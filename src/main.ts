@@ -20,19 +20,14 @@ import {
 } from "./world/chunk";
 import {
   BLOCK,
-  MAX_FLOWING_LEVEL,
   type BlockId,
-  blockColor,
   blockKind,
-  flowingWaterForLevel,
   isWaterBlock,
-  waterLevel,
 } from "./world/block";
 import {
   GRAVITY,
   JUMP_VELOCITY,
   PLAYER_EYE_OFFSET,
-  PLAYER_HALF_WIDTH,
   PLAYER_HEIGHT,
   SWIM_UP_VELOCITY,
   TERMINAL_VELOCITY,
@@ -45,6 +40,57 @@ import {
   type IsWaterAt,
   type PlayerState,
 } from "./game/physics";
+import {
+  HOTBAR_SLOTS,
+  addItemToInventory,
+  applyDroppedItemPhysics,
+  consumeSelected,
+  createInventoryState,
+  disposeDroppedItem,
+  isExpired,
+  isInPickupRange,
+  returnHeldToInventory,
+  spawnDroppedItem,
+  swapOrMergeSlot,
+  syncDroppedItemMesh,
+  type DroppedItem,
+} from "./game/item";
+import {
+  createPlayerEntity,
+  setPlayerEntityTransform,
+  setPlayerEntityVisible,
+  triggerArmSwing,
+  updatePlayerEntityAnimation,
+} from "./game/player-entity";
+import {
+  WATER_TICK_INTERVAL,
+  computeWaterState,
+  createWaterFlowState,
+  markPendingWithNeighbors as wfMarkPendingWithNeighbors,
+  parseWkey,
+} from "./game/water-flow";
+import {
+  computeTargetCell,
+  playerOverlapsBlock as ovOverlapsBlock,
+  raycastFromCamera,
+} from "./game/interaction";
+import {
+  consumeMouseDelta,
+  createInputState,
+  discardMouseDelta,
+  installInputHandlers,
+} from "./core/input";
+import {
+  computeCameraTransform,
+  nextViewMode,
+  type ViewMode,
+} from "./core/camera";
+import {
+  createCrosshair,
+  createHudTextOverlay,
+  createLockOverlay,
+} from "./ui/hud";
+import { createInventoryUi } from "./ui/inventory-ui";
 
 const SEED = 12345;
 const VIEW_RADIUS = 3; // プレイヤーから ±VIEW_RADIUS チャンク = (2R+1)^2 がロード対象
@@ -104,22 +150,9 @@ interface ChunkMeshes {
 }
 const chunkBlocks = new Map<string, Uint8Array>();
 const chunkMeshes = new Map<string, ChunkMeshes>();
-// インベントリ: 36 スロット（前 9 = ホットバー、後 27 = MC 標準の 3×9 グリッド）
-const HOTBAR_SLOTS = 9;
-const INVENTORY_SLOTS = 27;
-const TOTAL_SLOTS = HOTBAR_SLOTS + INVENTORY_SLOTS;
-const MAX_STACK = 64;
-interface ItemStack {
-  block: BlockId;
-  count: number;
-}
-const inventory: (ItemStack | null)[] = new Array(TOTAL_SLOTS).fill(null);
-inventory[0] = { block: BLOCK.GRASS, count: MAX_STACK };
-inventory[1] = { block: BLOCK.STONE, count: MAX_STACK };
-inventory[2] = { block: BLOCK.SAND, count: MAX_STACK };
-inventory[3] = { block: BLOCK.WATER, count: MAX_STACK };
-let selectedHotbarIndex = 0;
-let heldItem: ItemStack | null = null;
+// インベントリ + ドロップアイテムは ./game/item に分離
+const inv = createInventoryState();
+const droppedItems: DroppedItem[] = [];
 let inventoryOpen = false;
 
 function chunkKey(cx: number, cz: number): string {
@@ -442,112 +475,21 @@ const isSolid: IsSolidAt = (wx, wy, wz) => {
   return blockKind(blocks[idx(c.lx, c.y, c.lz)] as BlockId) === "opaque";
 };
 
-// プレイヤーエンティティ（MC Steve 風の 6 ボックス、腕脚は関節で振れる）
-// 高さ 1.8 を [脚 0~0.65][胴 0.65~1.3][頭 1.3~1.8] に配分
-const SKIN_COLOR = 0xeebd9e;
-const SHIRT_COLOR = 0x3b7eb3;
-const PANTS_COLOR = 0x2a4670;
+// プレイヤーエンティティは ./game/player-entity に分離
+const playerEntity = createPlayerEntity();
+scene.add(playerEntity.group);
+setPlayerEntityVisible(playerEntity, false); // 一人称ではデフォルト非表示
 
-function makeBox(
-  w: number,
-  h: number,
-  d: number,
-  color: number,
-): THREE.Mesh {
-  const geo = new THREE.BoxGeometry(w, h, d);
-  const mat = new THREE.MeshLambertMaterial({ color });
-  return new THREE.Mesh(geo, mat);
-}
-
-// 関節 (joint) を pivot に持つ手足
-// メッシュ自体は -h/2 にオフセットして joint からぶら下がる形にする
-function makeLimb(
-  w: number,
-  h: number,
-  d: number,
-  color: number,
-  pivotX: number,
-  pivotY: number,
-  pivotZ: number,
-): THREE.Group {
-  const group = new THREE.Group();
-  const mesh = makeBox(w, h, d, color);
-  mesh.position.y = -h / 2;
-  group.add(mesh);
-  group.position.set(pivotX, pivotY, pivotZ);
-  return group;
-}
-
-const playerGroup = new THREE.Group();
-
-// 頭 0.5x0.5x0.5、中心 y=1.55（固定）
-const playerHead = makeBox(0.5, 0.5, 0.5, SKIN_COLOR);
-playerHead.position.set(0, 1.55, 0);
-playerGroup.add(playerHead);
-
-// 胴 0.5x0.65x0.25、中心 y=0.975（固定）
-const playerBody = makeBox(0.5, 0.65, 0.25, SHIRT_COLOR);
-playerBody.position.set(0, 0.975, 0);
-playerGroup.add(playerBody);
-
-// 腕: 肩 (y=1.3) を pivot に
-const leftArm = makeLimb(0.2, 0.65, 0.25, SKIN_COLOR, -0.35, 1.3, 0);
-const rightArm = makeLimb(0.2, 0.65, 0.25, SKIN_COLOR, 0.35, 1.3, 0);
-// 脚: 股関節 (y=0.65) を pivot に
-const leftLeg = makeLimb(0.2, 0.65, 0.25, PANTS_COLOR, -0.1, 0.65, 0);
-const rightLeg = makeLimb(0.2, 0.65, 0.25, PANTS_COLOR, 0.1, 0.65, 0);
-playerGroup.add(leftArm, rightArm, leftLeg, rightLeg);
-
-scene.add(playerGroup);
-playerGroup.visible = false; // 一人称ではデフォルト非表示
-
-// アニメーション状態
-let walkPhase = 0;
-let walkSwingAmount = 0; // 0..1、移動中に増加・停止時に減衰
-const WALK_SWING_MAX = 0.6; // ラジアン
-const ARM_SWING_DURATION = 0.25; // 採掘/設置で腕を振る時間
-let armSwingTime = -1; // -1 = アニメなし
-
-function updatePlayerAnimation(dt: number) {
-  // 歩行スイング
+function playerAnimationInput() {
   const horizSpeed = Math.hypot(player.vx, player.vz);
-  const walking = horizSpeed > 0.1 && player.onGround;
-  if (walking) {
-    walkSwingAmount = Math.min(1, walkSwingAmount + dt * 6);
-    walkPhase += dt * horizSpeed * 1.8;
-  } else {
-    walkSwingAmount = Math.max(0, walkSwingAmount - dt * 6);
-  }
-  const swing = Math.sin(walkPhase) * WALK_SWING_MAX * walkSwingAmount;
-  leftArm.rotation.x = swing;
-  rightLeg.rotation.x = swing;
-  rightArm.rotation.x = -swing;
-  leftLeg.rotation.x = -swing;
-
-  // 腕振り（採掘・設置）: 右腕に上書き
-  if (armSwingTime >= 0) {
-    armSwingTime += dt;
-    if (armSwingTime >= ARM_SWING_DURATION) {
-      armSwingTime = -1;
-    } else {
-      const t = armSwingTime / ARM_SWING_DURATION;
-      // 0 → 1 → 0 のサインスイング、前方向（負の X 回転）
-      const sw = Math.sin(t * Math.PI) * 1.4;
-      rightArm.rotation.x = -sw;
-    }
-  }
+  return {
+    isWalking: horizSpeed > 0.1 && player.onGround,
+    walkSpeed: horizSpeed,
+  };
 }
 
 // 視点モード
-type ViewMode = "first" | "third-back" | "third-front";
 let viewMode: ViewMode = "first";
-const VIEW_DISTANCE = 4; // 三人称時のカメラ距離
-
-function nextViewMode(m: ViewMode): ViewMode {
-  if (m === "first") return "third-back";
-  if (m === "third-back") return "third-front";
-  return "first";
-}
 
 const isWater: IsWaterAt = (wx, wy, wz) => {
   if (wy < 0 || wy >= CHUNK_SIZE_Y) return false;
@@ -562,26 +504,10 @@ const isWater: IsWaterAt = (wx, wy, wz) => {
 // 水の流体シミュレーション（5Hz ティック、ソース/フロー方式）
 // ============================================================
 
-const WATER_TICK_INTERVAL = 0.2;
-let waterTickAcc = 0;
-const pendingWater = new Set<string>();
-
-function wkey(wx: number, wy: number, wz: number): string {
-  return `${wx},${wy},${wz}`;
-}
-
-function markPendingWater(wx: number, wy: number, wz: number) {
-  pendingWater.add(wkey(wx, wy, wz));
-}
+const waterFlow = createWaterFlowState();
 
 function markPendingWithNeighbors(wx: number, wy: number, wz: number) {
-  markPendingWater(wx, wy, wz);
-  markPendingWater(wx + 1, wy, wz);
-  markPendingWater(wx - 1, wy, wz);
-  markPendingWater(wx, wy + 1, wz);
-  markPendingWater(wx, wy - 1, wz);
-  markPendingWater(wx, wy, wz + 1);
-  markPendingWater(wx, wy, wz - 1);
+  wfMarkPendingWithNeighbors(waterFlow, wx, wy, wz);
 }
 
 function getBlockAt(wx: number, wy: number, wz: number): BlockId {
@@ -603,60 +529,17 @@ function setBlockAt(wx: number, wy: number, wz: number, id: BlockId): boolean {
   return true;
 }
 
-// 周囲セルから新しい状態を計算（純粋関数）
-function computeWaterState(
-  wx: number,
-  wy: number,
-  wz: number,
-  current: BlockId,
-): BlockId {
-  // SOURCE は不滅
-  if (current === BLOCK.WATER) return BLOCK.WATER;
-  // 不透明ブロックは触らない
-  if (blockKind(current) === "opaque") return current;
-
-  // 上に水 → 滝の中（最強の流動水）
-  const above = getBlockAt(wx, wy + 1, wz);
-  if (isWaterBlock(above)) return BLOCK.WATER_F1;
-
-  // 横の最低レベル水を探す
-  // ただし「直下が opaque で支えられている水」だけが水平方向に広がれる。
-  // 直下が空気や水の水（空中の source や滝の途中の F1）は広がる側にならない。
-  let minLevel = MAX_FLOWING_LEVEL + 1;
-  const dirs: [number, number][] = [
-    [1, 0],
-    [-1, 0],
-    [0, 1],
-    [0, -1],
-  ];
-  for (const [dx, dz] of dirs) {
-    const nx = wx + dx;
-    const nz = wz + dz;
-    const n = getBlockAt(nx, wy, nz);
-    if (!isWaterBlock(n)) continue;
-    // 隣接水の直下が床 (opaque) でなければ、その水は広がる元にならない
-    const belowN = getBlockAt(nx, wy - 1, nz);
-    if (blockKind(belowN) !== "opaque") continue;
-    const lvl = waterLevel(n);
-    if (lvl >= 0 && lvl < minLevel) minLevel = lvl;
-  }
-
-  // 隣接水の +1 が MAX を超えたら水にならない（流動だったら干上がる）
-  if (minLevel >= MAX_FLOWING_LEVEL) return BLOCK.AIR;
-  return flowingWaterForLevel(minLevel + 1);
-}
-
 function waterTick() {
-  if (pendingWater.size === 0) return;
+  if (waterFlow.pending.size === 0) return;
 
-  const toProcess = [...pendingWater];
-  pendingWater.clear();
+  const toProcess = [...waterFlow.pending];
+  waterFlow.pending.clear();
 
   const changes: [number, number, number, BlockId][] = [];
   for (const k of toProcess) {
-    const [wx, wy, wz] = k.split(",").map(Number);
+    const [wx, wy, wz] = parseWkey(k);
     const current = getBlockAt(wx, wy, wz);
-    const next = computeWaterState(wx, wy, wz, current);
+    const next = computeWaterState(wx, wy, wz, current, getBlockAt);
     if (next !== current) changes.push([wx, wy, wz, next]);
   }
 
@@ -688,23 +571,14 @@ function waterTick() {
 // 入力
 // ============================================================
 
-const keys = new Set<string>();
-window.addEventListener("keydown", (e) => keys.add(e.code));
-window.addEventListener("keyup", (e) => keys.delete(e.code));
-window.addEventListener("blur", () => keys.clear()); // フォーカス外れたら全部リセット
+const input = createInputState();
+installInputHandlers(input, {
+  isMouseActive: () => document.pointerLockElement === renderer.domElement,
+});
 
-// マウス（pointer lock 中のみ累積）
 let yaw = 0;
 let pitch = 0;
 const MOUSE_SENSITIVITY = 0.002;
-let pendingDX = 0;
-let pendingDY = 0;
-
-document.addEventListener("mousemove", (e) => {
-  if (document.pointerLockElement !== renderer.domElement) return;
-  pendingDX += e.movementX;
-  pendingDY += e.movementY;
-});
 
 // クリックで pointer lock 取得
 renderer.domElement.addEventListener("click", () => {
@@ -718,172 +592,59 @@ renderer.domElement.addEventListener("click", () => {
 // ============================================================
 
 const raycaster = new THREE.Raycaster();
-const screenCenter = new THREE.Vector2(0, 0);
 
 function pickHit(): THREE.Intersection | null {
-  raycaster.setFromCamera(screenCenter, camera);
   const meshes: THREE.Mesh[] = [];
   for (const m of chunkMeshes.values()) {
     if (m.opaque) meshes.push(m.opaque);
   }
-  const hits = raycaster.intersectObjects(meshes, false);
-  return hits[0] ?? null;
+  return raycastFromCamera(raycaster, camera, meshes);
 }
 
 function playerOverlapsBlock(bx: number, by: number, bz: number): boolean {
-  const hw = PLAYER_HALF_WIDTH;
-  const h = PLAYER_HEIGHT;
-  return (
-    player.x - hw < bx + 1 &&
-    player.x + hw > bx &&
-    player.y < by + 1 &&
-    player.y + h > by &&
-    player.z - hw < bz + 1 &&
-    player.z + hw > bz
-  );
+  return ovOverlapsBlock(player.x, player.y, player.z, bx, by, bz);
 }
 
-// ============================================================
-// ドロップアイテム（ブロックを壊した時に出る小さな立方体）
-// ============================================================
-
-interface DroppedItem {
-  block: BlockId;
-  mesh: THREE.Mesh;
-  x: number;
-  y: number;
-  z: number;
-  vx: number;
-  vy: number;
-  vz: number;
-  age: number;
-}
-
-const ITEM_SIZE = 0.25;
-const ITEM_GRAVITY = -16;
-const ITEM_TERMINAL_VELOCITY = -20;
-const ITEM_POP_VY = 3;
-const ITEM_POP_HORIZ = 1.5;
-const ITEM_HORIZONTAL_FRICTION = 0.85; // 1秒で 0.85^60 ≈ 微小、速やかに止まる
-const ITEM_PICKUP_RADIUS = 1.5;
-const ITEM_LIFETIME = 300; // 5分で自動消滅
-
-const droppedItems: DroppedItem[] = [];
-
-function spawnDroppedItem(
-  block: BlockId,
-  x: number,
-  y: number,
-  z: number,
-) {
-  const [r, g, b] = blockColor(block);
-  const color = (r << 16) | (g << 8) | b;
-  const geo = new THREE.BoxGeometry(ITEM_SIZE, ITEM_SIZE, ITEM_SIZE);
-  const mat = new THREE.MeshLambertMaterial({ color });
-  const mesh = new THREE.Mesh(geo, mat);
-  mesh.position.set(x, y, z);
-  scene.add(mesh);
-  const angle = Math.random() * Math.PI * 2;
-  droppedItems.push({
-    block,
-    mesh,
-    x,
-    y,
-    z,
-    vx: Math.cos(angle) * ITEM_POP_HORIZ,
-    vy: ITEM_POP_VY,
-    vz: Math.sin(angle) * ITEM_POP_HORIZ,
-    age: 0,
-  });
-}
-
-function disposeDroppedItem(item: DroppedItem) {
-  scene.remove(item.mesh);
-  item.mesh.geometry.dispose();
-}
-
-// 既存スタックに合流できれば true、新規スタックを作れれば true、満杯なら false
-function addItemToInventory(block: BlockId): boolean {
-  // 1) 同じブロックの既存スタックに追加
-  for (let i = 0; i < TOTAL_SLOTS; i++) {
-    const slot = inventory[i];
-    if (slot && slot.block === block && slot.count < MAX_STACK) {
-      slot.count += 1;
-      return true;
-    }
-  }
-  // 2) 空スロットに新規スタック
-  for (let i = 0; i < TOTAL_SLOTS; i++) {
-    if (inventory[i] === null) {
-      inventory[i] = { block, count: 1 };
-      return true;
-    }
-  }
-  return false;
-}
-
+// ドロップアイテム処理のループ（モジュール関数を組み合わせて使う）
 function updateItems(dt: number) {
   if (droppedItems.length === 0) return;
+  const px = player.x;
+  const py = player.y + PLAYER_HEIGHT * 0.5;
+  const pz = player.z;
   for (let i = droppedItems.length - 1; i >= 0; i--) {
     const item = droppedItems[i];
-    item.age += dt;
-
-    // 寿命
-    if (item.age > ITEM_LIFETIME) {
-      disposeDroppedItem(item);
+    applyDroppedItemPhysics(item, dt, isSolid);
+    if (isExpired(item)) {
+      disposeDroppedItem(item, scene);
       droppedItems.splice(i, 1);
       continue;
     }
-
-    // 重力 + 水平摩擦
-    item.vy += ITEM_GRAVITY * dt;
-    if (item.vy < ITEM_TERMINAL_VELOCITY) item.vy = ITEM_TERMINAL_VELOCITY;
-    // フレームレート非依存の減衰
-    const frictionFactor = Math.pow(ITEM_HORIZONTAL_FRICTION, dt * 60);
-    item.vx *= frictionFactor;
-    item.vz *= frictionFactor;
-
-    item.x += item.vx * dt;
-    item.y += item.vy * dt;
-    item.z += item.vz * dt;
-
-    // 簡易着地判定: ブロックの中心が opaque なら上面にスナップ
-    const cellY = Math.floor(item.y);
-    if (isSolid(Math.floor(item.x), cellY, Math.floor(item.z))) {
-      item.y = cellY + 1;
-      item.vy = 0;
-    }
-
-    // 拾得判定: プレイヤー中心 (足元+高さ/2) との距離
-    const dx = player.x - item.x;
-    const dy = player.y + PLAYER_HEIGHT * 0.5 - item.y;
-    const dz = player.z - item.z;
-    const distSq = dx * dx + dy * dy + dz * dz;
-    if (distSq < ITEM_PICKUP_RADIUS * ITEM_PICKUP_RADIUS) {
-      if (addItemToInventory(item.block)) {
-        disposeDroppedItem(item);
+    if (isInPickupRange(item, px, py, pz)) {
+      if (addItemToInventory(inv, item.block)) {
+        disposeDroppedItem(item, scene);
         droppedItems.splice(i, 1);
         renderSlots();
         continue;
       }
     }
-
-    // 視覚アニメーション: バウンスと回転（描画用）
-    const bob = Math.sin(item.age * 2.5) * 0.06;
-    item.mesh.position.set(item.x, item.y + bob, item.z);
-    item.mesh.rotation.y = item.age * 1.8;
+    syncDroppedItemMesh(item);
   }
 }
 
 function modifyBlock(hit: THREE.Intersection, place: boolean) {
   if (!hit.face) return;
-  const normal = hit.face.normal;
-  const point = hit.point;
-  const eps = 0.001;
-  const sign = place ? 1 : -1;
-  const wx = Math.floor(point.x + normal.x * eps * sign);
-  const wy = Math.floor(point.y + normal.y * eps * sign);
-  const wz = Math.floor(point.z + normal.z * eps * sign);
+  const target = computeTargetCell(
+    hit.point.x,
+    hit.point.y,
+    hit.point.z,
+    hit.face.normal.x,
+    hit.face.normal.y,
+    hit.face.normal.z,
+    place,
+  );
+  const wx = target.x;
+  const wy = target.y;
+  const wz = target.z;
 
   if (place && playerOverlapsBlock(wx, wy, wz)) return;
 
@@ -891,20 +652,24 @@ function modifyBlock(hit: THREE.Intersection, place: boolean) {
   if (!coords) return;
   const blocks = chunkBlocks.get(chunkKey(coords.cx, coords.cz));
   if (!blocks) return;
-  const placement = inventory[selectedHotbarIndex];
-  if (place && (placement === null || placement.count === 0)) return; // 空スロット選択時は設置できない
+  const selected = inv.slots[inv.selectedHotbarIndex];
+  if (place && (selected === null || selected.count === 0)) return; // 空スロット選択時は設置できない
   const cellIdx = idx(coords.lx, coords.y, coords.lz);
   const previousBlock = blocks[cellIdx] as BlockId;
-  blocks[cellIdx] = place ? placement!.block : BLOCK.AIR;
 
   if (place) {
-    // 設置時はホットバーのスタックを 1 消費
-    placement!.count -= 1;
-    if (placement!.count === 0) inventory[selectedHotbarIndex] = null;
+    const consumed = consumeSelected(inv);
+    if (consumed === null) return;
+    blocks[cellIdx] = consumed;
     renderSlots();
-  } else if (previousBlock !== BLOCK.AIR && !isWaterBlock(previousBlock)) {
-    // 破壊時はそのブロックに対応するアイテムをドロップ（水は除外）
-    spawnDroppedItem(previousBlock, wx + 0.5, wy + 0.5, wz + 0.5);
+  } else {
+    blocks[cellIdx] = BLOCK.AIR;
+    if (previousBlock !== BLOCK.AIR && !isWaterBlock(previousBlock)) {
+      // 破壊時はそのブロックに対応するアイテムをドロップ（水は除外）
+      droppedItems.push(
+        spawnDroppedItem(previousBlock, wx + 0.5, wy + 0.5, wz + 0.5, scene),
+      );
+    }
   }
 
   // 水流の再評価候補に追加
@@ -930,7 +695,7 @@ window.addEventListener("mousedown", (e) => {
   const hit = pickHit();
   if (!hit) return;
   if (e.button === 0 || e.button === 2) {
-    armSwingTime = 0; // 腕振りトリガー（クリック時点で必ず）
+    triggerArmSwing(playerEntity); // 腕振りトリガー（クリック時点で必ず）
   }
   if (e.button === 0) modifyBlock(hit, false);
   if (e.button === 2) modifyBlock(hit, true);
@@ -945,10 +710,10 @@ window.addEventListener(
     if (e.deltaY === 0) return;
     e.preventDefault();
     const n = HOTBAR_SLOTS;
-    selectedHotbarIndex =
+    inv.selectedHotbarIndex =
       e.deltaY > 0
-        ? (selectedHotbarIndex + 1) % n
-        : (selectedHotbarIndex - 1 + n) % n;
+        ? (inv.selectedHotbarIndex + 1) % n
+        : (inv.selectedHotbarIndex - 1 + n) % n;
     renderSlots();
   },
   { passive: false },
@@ -969,176 +734,62 @@ const BLOCK_NAMES: Record<BlockId, string> = {
   [BLOCK.WATER_F2]: "WATER (flowing 2)",
   [BLOCK.WATER_F3]: "WATER (flowing 3)",
 };
-const hud = document.createElement("div");
-hud.style.cssText =
-  "position:absolute;top:10px;left:10px;background:rgba(0,0,0,0.55);color:#fff;padding:10px 12px;font-family:sans-serif;font-size:13px;line-height:1.5;pointer-events:none;border-radius:4px;";
-document.body.appendChild(hud);
 
-const lockOverlay = document.createElement("div");
-lockOverlay.style.cssText =
-  "position:absolute;inset:0;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.5);color:#fff;font-family:sans-serif;font-size:22px;pointer-events:none;";
-lockOverlay.textContent = "Click to play";
-document.body.appendChild(lockOverlay);
+const hudOverlay = createHudTextOverlay();
+const lockOverlay = createLockOverlay("Click to play");
+createCrosshair();
 
-document.addEventListener("pointerlockchange", updateLockOverlay);
-
-const crosshair = document.createElement("div");
-crosshair.style.cssText =
-  "position:absolute;top:50%;left:50%;width:16px;height:16px;margin:-8px 0 0 -8px;pointer-events:none;";
-crosshair.innerHTML = `
-  <div style="position:absolute;top:7px;left:0;right:0;height:2px;background:white;mix-blend-mode:difference;"></div>
-  <div style="position:absolute;left:7px;top:0;bottom:0;width:2px;background:white;mix-blend-mode:difference;"></div>
-`;
-document.body.appendChild(crosshair);
-
-// ホットバー（画面下中央）+ インベントリ（その上、E で開閉）
-const SLOT_CSS_BASE =
-  "width:60px;height:60px;display:flex;flex-direction:column;justify-content:space-between;padding:4px;box-sizing:border-box;color:white;font-family:sans-serif;font-size:11px;text-shadow:1px 1px 0 black;border-radius:4px;cursor:default;";
-
-const hotbarEl = document.createElement("div");
-hotbarEl.style.cssText =
-  "position:absolute;bottom:20px;left:50%;transform:translateX(-50%);display:flex;gap:6px;pointer-events:none;";
-document.body.appendChild(hotbarEl);
-
-const inventoryEl = document.createElement("div");
-inventoryEl.style.cssText =
-  "position:absolute;bottom:100px;left:50%;transform:translateX(-50%);display:none;grid-template-columns:repeat(9,60px);gap:6px;pointer-events:none;background:rgba(0,0,0,0.5);padding:10px;border-radius:8px;";
-document.body.appendChild(inventoryEl);
-
-const heldItemEl = document.createElement("div");
-heldItemEl.style.cssText =
-  "position:absolute;width:44px;height:44px;border-radius:4px;display:none;pointer-events:none;z-index:1000;transform:translate(-50%,-50%);box-shadow:0 2px 6px rgba(0,0,0,0.6);";
-document.body.appendChild(heldItemEl);
-
-const slotEls: HTMLDivElement[] = [];
-for (let i = 0; i < TOTAL_SLOTS; i++) {
-  const el = document.createElement("div");
-  el.style.cssText = SLOT_CSS_BASE;
-  el.addEventListener("click", () => handleSlotClick(i));
-  slotEls.push(el);
-  if (i < HOTBAR_SLOTS) hotbarEl.appendChild(el);
-  else inventoryEl.appendChild(el);
-}
+const inventoryUi = createInventoryUi({
+  blockNames: BLOCK_NAMES,
+  onSlotClick: (index) => {
+    if (!inventoryOpen) return;
+    swapOrMergeSlot(inv, index);
+    inventoryUi.renderSlots(inv);
+    inventoryUi.renderHeld(inv.heldItem);
+  },
+});
 
 function renderSlots() {
-  for (let i = 0; i < TOTAL_SLOTS; i++) {
-    const el = slotEls[i];
-    const stack = inventory[i];
-    const slotLabel = i < HOTBAR_SLOTS ? i + 1 : "";
-    if (stack !== null) {
-      const [r, g, b] = blockColor(stack.block);
-      el.style.background = `rgb(${r},${g},${b})`;
-      const countText =
-        stack.count > 1
-          ? `<div style="text-align:right;font-weight:bold;font-size:13px;">${stack.count}</div>`
-          : `<div></div>`;
-      el.innerHTML = `
-        <div style="display:flex;justify-content:space-between;align-items:flex-start;font-weight:bold;font-size:11px;">
-          <span>${slotLabel}</span>
-        </div>
-        <div style="text-align:center;font-size:9px;line-height:1.1;">${BLOCK_NAMES[stack.block]}</div>
-        ${countText}
-      `;
-    } else {
-      el.style.background = "rgba(0,0,0,0.3)";
-      el.innerHTML = `<div style="font-weight:bold;color:rgba(255,255,255,0.35);">${slotLabel}</div>`;
-    }
-    if (i < HOTBAR_SLOTS) {
-      const sel = i === selectedHotbarIndex;
-      el.style.border = sel
-        ? "3px solid white"
-        : "3px solid rgba(0,0,0,0.6)";
-      el.style.transform = sel ? "translateY(-4px)" : "none";
-    } else {
-      el.style.border = "3px solid rgba(0,0,0,0.6)";
-      el.style.transform = "none";
-    }
-  }
+  inventoryUi.renderSlots(inv);
 }
-
 function renderHeldItem() {
-  if (heldItem !== null) {
-    const [r, g, b] = blockColor(heldItem.block);
-    heldItemEl.style.background = `rgb(${r},${g},${b})`;
-    heldItemEl.innerHTML =
-      heldItem.count > 1
-        ? `<div style="position:absolute;bottom:2px;right:4px;color:white;text-shadow:1px 1px 0 black;font-weight:bold;font-family:sans-serif;font-size:13px;">${heldItem.count}</div>`
-        : "";
-    heldItemEl.style.display = "block";
-  } else {
-    heldItemEl.style.display = "none";
-  }
-}
-
-function handleSlotClick(index: number) {
-  if (!inventoryOpen) return;
-  const slot = inventory[index];
-  if (heldItem === null) {
-    if (slot !== null) {
-      heldItem = slot;
-      inventory[index] = null;
-    }
-  } else {
-    // 同じ種類なら合流（MAX_STACK まで）
-    if (slot !== null && slot.block === heldItem.block) {
-      const room = MAX_STACK - slot.count;
-      const move = Math.min(room, heldItem.count);
-      slot.count += move;
-      heldItem.count -= move;
-      if (heldItem.count === 0) heldItem = null;
-    } else {
-      // スワップ
-      inventory[index] = heldItem;
-      heldItem = slot;
-    }
-  }
-  renderSlots();
-  renderHeldItem();
+  inventoryUi.renderHeld(inv.heldItem);
 }
 
 function updateLockOverlay() {
   const locked = document.pointerLockElement === renderer.domElement;
-  lockOverlay.style.display = !locked && !inventoryOpen ? "flex" : "none";
+  lockOverlay.setVisible(!locked && !inventoryOpen);
 }
+
+document.addEventListener("pointerlockchange", updateLockOverlay);
 
 function setInventoryOpen(open: boolean) {
   if (inventoryOpen === open) return;
   inventoryOpen = open;
-  inventoryEl.style.display = open ? "grid" : "none";
-  hotbarEl.style.pointerEvents = open ? "auto" : "none";
-  inventoryEl.style.pointerEvents = open ? "auto" : "none";
+  inventoryUi.setInventoryOpen(open);
+  inventoryUi.setInteractive(open);
 
   if (open) {
     if (document.pointerLockElement === renderer.domElement) {
       document.exitPointerLock();
     }
   } else {
-    // 持ち物を戻す: 最初の空きスロットへ
-    if (heldItem !== null) {
-      for (let i = 0; i < TOTAL_SLOTS; i++) {
-        if (inventory[i] === null) {
-          inventory[i] = heldItem;
-          heldItem = null;
-          break;
-        }
-      }
+    // 持ち物を戻す（同種スタックに合流 or 空スロットへ）
+    if (inv.heldItem !== null) {
+      returnHeldToInventory(inv);
       renderHeldItem();
       renderSlots();
     }
-    // 入力残骸クリア
-    pendingDX = 0;
-    pendingDY = 0;
+    discardMouseDelta(input);
     // E キー（user gesture）で閉じている前提で pointer lock を再取得
-    // → "Click to play" オーバーレイなしに直接プレイ再開できる
     renderer.domElement.requestPointerLock();
   }
   updateLockOverlay();
 }
 
 document.addEventListener("mousemove", (e) => {
-  if (heldItem !== null) {
-    heldItemEl.style.left = e.clientX + "px";
-    heldItemEl.style.top = e.clientY + "px";
+  if (inv.heldItem !== null) {
+    inventoryUi.setHeldPosition(e.clientX, e.clientY);
   }
 });
 
@@ -1152,20 +803,20 @@ function updateHud() {
       : viewMode === "third-back"
         ? "third-person (back)"
         : "third-person (front)";
-  hud.innerHTML = `
+  hudOverlay.setHTML(`
     View: <b>${viewLabel}</b> (F5)<br>
     WASD = move, Space = jump<br>
     Left click = break / Right click = place<br>
     1-9 = select slot, wheel = cycle<br>
     E = open inventory / ESC = release cursor
-  `.trim();
+  `.trim());
 }
 updateHud();
 
 document.addEventListener("keydown", (e) => {
   // 1〜9 でホットバー選択
   if (/^Digit[1-9]$/.test(e.code)) {
-    selectedHotbarIndex = Number(e.code.slice(5)) - 1;
+    inv.selectedHotbarIndex = Number(e.code.slice(5)) - 1;
     renderSlots();
     return;
   }
@@ -1181,7 +832,7 @@ document.addEventListener("keydown", (e) => {
   if (e.code === "F5") {
     e.preventDefault();
     viewMode = nextViewMode(viewMode);
-    playerGroup.visible = viewMode !== "first";
+    setPlayerEntityVisible(playerEntity, viewMode !== "first");
     updateHud();
   }
 });
@@ -1208,37 +859,35 @@ function update(dt: number) {
 
   // インベントリ開いてる時は入力をスキップ（マウス累積はクリア）
   if (inventoryOpen) {
-    pendingDX = 0;
-    pendingDY = 0;
+    discardMouseDelta(input);
     player.vx = 0;
     player.vz = 0;
     player.vy += GRAVITY * dt;
     if (player.vy < TERMINAL_VELOCITY) player.vy = TERMINAL_VELOCITY;
     moveAndCollide(player, isSolid, dt);
-    updatePlayerAnimation(dt);
+    updatePlayerEntityAnimation(playerEntity, dt, playerAnimationInput());
     updateItems(dt);
-    waterTickAcc += dt;
-    while (waterTickAcc >= WATER_TICK_INTERVAL) {
+    waterFlow.tickAcc += dt;
+    while (waterFlow.tickAcc >= WATER_TICK_INTERVAL) {
       waterTick();
-      waterTickAcc -= WATER_TICK_INTERVAL;
+      waterFlow.tickAcc -= WATER_TICK_INTERVAL;
     }
     return;
   }
 
   // マウス → ヨー/ピッチ
-  yaw -= pendingDX * MOUSE_SENSITIVITY;
-  pitch -= pendingDY * MOUSE_SENSITIVITY;
+  const [dx, dy] = consumeMouseDelta(input);
+  yaw -= dx * MOUSE_SENSITIVITY;
+  pitch -= dy * MOUSE_SENSITIVITY;
   pitch = Math.max(-Math.PI / 2 + 0.01, Math.min(Math.PI / 2 - 0.01, pitch));
-  pendingDX = 0;
-  pendingDY = 0;
 
   // WASD → 移動方向（ヨー基準）
   let forward = 0;
   let strafe = 0;
-  if (keys.has("KeyW")) forward += 1;
-  if (keys.has("KeyS")) forward -= 1;
-  if (keys.has("KeyA")) strafe -= 1;
-  if (keys.has("KeyD")) strafe += 1;
+  if (input.keys.has("KeyW")) forward += 1;
+  if (input.keys.has("KeyS")) forward -= 1;
+  if (input.keys.has("KeyA")) strafe -= 1;
+  if (input.keys.has("KeyD")) strafe += 1;
   const len = Math.hypot(forward, strafe);
   if (len > 0) {
     forward /= len;
@@ -1259,7 +908,7 @@ function update(dt: number) {
   if (player.vy < terminal) player.vy = terminal;
 
   // ジャンプ / 泳ぎ
-  if (keys.has("Space")) {
+  if (input.keys.has("Space")) {
     if (inWater) {
       // 水中: onGround 関係なく上昇（Space 押下中は浮力で上がり続ける）
       player.vy = SWIM_UP_VELOCITY;
@@ -1272,52 +921,35 @@ function update(dt: number) {
   moveAndCollide(player, isSolid, dt);
 
   // プレイヤーアニメ
-  updatePlayerAnimation(dt);
+  updatePlayerEntityAnimation(playerEntity, dt, playerAnimationInput());
 
   // ドロップアイテム（物理 + 拾得判定）
   updateItems(dt);
 
   // 水流ティック（5Hz）
-  waterTickAcc += dt;
-  while (waterTickAcc >= WATER_TICK_INTERVAL) {
+  waterFlow.tickAcc += dt;
+  while (waterFlow.tickAcc >= WATER_TICK_INTERVAL) {
     waterTick();
-    waterTickAcc -= WATER_TICK_INTERVAL;
+    waterFlow.tickAcc -= WATER_TICK_INTERVAL;
   }
 }
 
 function render() {
-  const eyeY = player.y + PLAYER_EYE_OFFSET;
-  // 視線方向（forward ベクトル）
-  const fx = -Math.sin(yaw) * Math.cos(pitch);
-  const fy = Math.sin(pitch);
-  const fz = -Math.cos(yaw) * Math.cos(pitch);
-
-  if (viewMode === "first") {
-    camera.position.set(player.x, eyeY, player.z);
-    camera.rotation.y = yaw;
-    camera.rotation.x = pitch;
-  } else if (viewMode === "third-back") {
-    camera.position.set(
-      player.x - fx * VIEW_DISTANCE,
-      eyeY - fy * VIEW_DISTANCE,
-      player.z - fz * VIEW_DISTANCE,
-    );
-    camera.rotation.y = yaw;
-    camera.rotation.x = pitch;
-  } else {
-    // 三人称前面: カメラはプレイヤーの前 + 視線を180度反転
-    camera.position.set(
-      player.x + fx * VIEW_DISTANCE,
-      eyeY + fy * VIEW_DISTANCE,
-      player.z + fz * VIEW_DISTANCE,
-    );
-    camera.rotation.y = yaw + Math.PI;
-    camera.rotation.x = -pitch;
-  }
+  const t = computeCameraTransform(
+    player.x,
+    player.y,
+    player.z,
+    PLAYER_EYE_OFFSET,
+    yaw,
+    pitch,
+    viewMode,
+  );
+  camera.position.set(t.posX, t.posY, t.posZ);
+  camera.rotation.y = t.rotY;
+  camera.rotation.x = t.rotX;
 
   // プレイヤーモデルの位置・向き（yaw に合わせて体が回る）
-  playerGroup.position.set(player.x, player.y, player.z);
-  playerGroup.rotation.y = yaw;
+  setPlayerEntityTransform(playerEntity, player.x, player.y, player.z, yaw);
 
   // 視点（目の位置）が水中なら濃い藍色のフォグ + 背景に切替
   const eyeInWater = isWater(
