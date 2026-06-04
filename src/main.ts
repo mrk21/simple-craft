@@ -25,10 +25,15 @@ import {
   PLAYER_EYE_OFFSET,
   PLAYER_HALF_WIDTH,
   PLAYER_HEIGHT,
+  SWIM_UP_VELOCITY,
   TERMINAL_VELOCITY,
   WALK_SPEED,
+  WATER_GRAVITY,
+  WATER_TERMINAL_VELOCITY,
+  isInWater,
   moveAndCollide,
   type IsSolidAt,
+  type IsWaterAt,
   type PlayerState,
 } from "./game/physics";
 
@@ -403,6 +408,15 @@ const isSolid: IsSolidAt = (wx, wy, wz) => {
   return blockKind(blocks[idx(c.lx, c.y, c.lz)] as BlockId) === "opaque";
 };
 
+const isWater: IsWaterAt = (wx, wy, wz) => {
+  if (wy < 0 || wy >= CHUNK_SIZE_Y) return false;
+  const c = worldToChunkLocal(wx, wy, wz);
+  if (!c) return false;
+  const blocks = chunkBlocks.get(chunkKey(c.cx, c.cz));
+  if (!blocks) return false;
+  return blocks[idx(c.lx, c.y, c.lz)] === BLOCK.WATER;
+};
+
 // ============================================================
 // 入力
 // ============================================================
@@ -613,13 +627,22 @@ function update(dt: number) {
   player.vx = (fx * forward + rx * strafe) * WALK_SPEED;
   player.vz = (fz * forward + rz * strafe) * WALK_SPEED;
 
-  // 重力
-  player.vy += GRAVITY * dt;
-  if (player.vy < TERMINAL_VELOCITY) player.vy = TERMINAL_VELOCITY;
+  // 水中判定で重力と終端速度を切り替え
+  const inWater = isInWater(player, isWater);
+  const gravity = inWater ? WATER_GRAVITY : GRAVITY;
+  const terminal = inWater ? WATER_TERMINAL_VELOCITY : TERMINAL_VELOCITY;
+  player.vy += gravity * dt;
+  if (player.vy < terminal) player.vy = terminal;
 
-  // ジャンプ
-  if (keys.has("Space") && player.onGround) {
-    player.vy = JUMP_VELOCITY;
+  // ジャンプ / 泳ぎ
+  if (keys.has("Space")) {
+    if (inWater) {
+      // 水中: onGround 関係なく上昇（Space 押下中は浮力で上がり続ける）
+      player.vy = SWIM_UP_VELOCITY;
+    } else if (player.onGround) {
+      // 地上: 通常ジャンプ
+      player.vy = JUMP_VELOCITY;
+    }
   }
 
   moveAndCollide(player, isSolid, dt);

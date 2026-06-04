@@ -1,5 +1,5 @@
 import { test, expect } from 'vitest';
-import { moveAndCollide, type PlayerState } from './physics';
+import { isInWater, moveAndCollide, type PlayerState } from './physics';
 
 function makePlayer(over: Partial<PlayerState> = {}): PlayerState {
   return {
@@ -68,4 +68,23 @@ test('障害物なし落下中は vy が moveAndCollide で変わらない（重
   expect(player.y).toBeCloseTo(97.5);
   expect(player.vy).toBe(-5);
   expect(player.onGround).toBe(false);
+});
+
+test('isInWater: 水ブロックがない時は false', () => {
+  const player = makePlayer({ x: 0.5, y: 64, z: 0.5 });
+  expect(isInWater(player, () => false)).toBe(false);
+});
+
+test('isInWater: 水ブロックがプレイヤー AABB と重なる時は true', () => {
+  // プレイヤー y=64 → AABB Y=[64, 65.8]、足元 y=64 を水にする
+  const player = makePlayer({ x: 0.5, y: 64, z: 0.5 });
+  const isWater = (_x: number, y: number, _z: number) => y === 64;
+  expect(isInWater(player, isWater)).toBe(true);
+});
+
+test('isInWater: 水の上に立っている場合は false（AABB は水と重ならない）', () => {
+  // プレイヤー y=64、水は y=63（プレイヤー AABB の minY=64 より下）
+  const player = makePlayer({ x: 0.5, y: 64, z: 0.5 });
+  const isWater = (_x: number, y: number, _z: number) => y === 63;
+  expect(isInWater(player, isWater)).toBe(false);
 });

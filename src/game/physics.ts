@@ -6,6 +6,11 @@ export const JUMP_VELOCITY = 8;
 export const WALK_SPEED = 4.3;
 export const TERMINAL_VELOCITY = -50;
 
+// 水中物理
+export const WATER_GRAVITY = -8;
+export const WATER_TERMINAL_VELOCITY = -3;
+export const SWIM_UP_VELOCITY = 4;
+
 export interface PlayerState {
   x: number;
   y: number;
@@ -17,6 +22,7 @@ export interface PlayerState {
 }
 
 export type IsSolidAt = (x: number, y: number, z: number) => boolean;
+export type IsWaterAt = (x: number, y: number, z: number) => boolean;
 
 interface AABB {
   minX: number;
@@ -25,6 +31,22 @@ interface AABB {
   maxY: number;
   minZ: number;
   maxZ: number;
+}
+
+// プレイヤー AABB のいずれかのセルが水なら true
+export function isInWater(
+  player: PlayerState,
+  isWater: IsWaterAt,
+): boolean {
+  const b = playerAabb(player);
+  for (let y = b.minY; y <= b.maxY; y++) {
+    for (let z = b.minZ; z <= b.maxZ; z++) {
+      for (let x = b.minX; x <= b.maxX; x++) {
+        if (isWater(x, y, z)) return true;
+      }
+    }
+  }
+  return false;
 }
 
 function playerAabb(player: PlayerState): AABB {
