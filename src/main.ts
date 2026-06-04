@@ -104,7 +104,18 @@ interface ChunkMeshes {
 }
 const chunkBlocks = new Map<string, Uint8Array>();
 const chunkMeshes = new Map<string, ChunkMeshes>();
-let selectedBlock: BlockId = BLOCK.STONE;
+// インベントリ: 36 スロット（前 9 = ホットバー、後 27 = MC 標準の 3×9 グリッド）
+const HOTBAR_SLOTS = 9;
+const INVENTORY_SLOTS = 27;
+const TOTAL_SLOTS = HOTBAR_SLOTS + INVENTORY_SLOTS;
+const inventory: (BlockId | null)[] = new Array(TOTAL_SLOTS).fill(null);
+inventory[0] = BLOCK.GRASS;
+inventory[1] = BLOCK.STONE;
+inventory[2] = BLOCK.SAND;
+inventory[3] = BLOCK.WATER;
+let selectedHotbarIndex = 0;
+let heldItem: BlockId | null = null;
+let inventoryOpen = false;
 
 function chunkKey(cx: number, cz: number): string {
   return `${cx},${cz}`;
@@ -743,8 +754,10 @@ function modifyBlock(hit: THREE.Intersection, place: boolean) {
   if (!coords) return;
   const blocks = chunkBlocks.get(chunkKey(coords.cx, coords.cz));
   if (!blocks) return;
+  const placement = inventory[selectedHotbarIndex];
+  if (place && placement === null) return; // 空スロット選択時は設置できない
   blocks[idx(coords.lx, coords.y, coords.lz)] = place
-    ? selectedBlock
+    ? placement!
     : BLOCK.AIR;
 
   // 水流の再評価候補に追加
@@ -765,6 +778,7 @@ function modifyBlock(hit: THREE.Intersection, place: boolean) {
 }
 
 window.addEventListener("mousedown", (e) => {
+  if (inventoryOpen) return; // インベントリ操作はスロットの click ハンドラ側
   if (document.pointerLockElement !== renderer.domElement) return;
   const hit = pickHit();
   if (!hit) return;
@@ -779,16 +793,16 @@ window.addEventListener("mousedown", (e) => {
 window.addEventListener(
   "wheel",
   (e) => {
+    if (inventoryOpen) return;
     if (document.pointerLockElement !== renderer.domElement) return;
     if (e.deltaY === 0) return;
     e.preventDefault();
-    const current = hotbarConfig.findIndex((c) => c.block === selectedBlock);
-    const n = hotbarConfig.length;
-    // 下スクロール (deltaY > 0) で次のスロット、上スクロールで前のスロット
-    const next =
-      e.deltaY > 0 ? (current + 1) % n : (current - 1 + n) % n;
-    selectedBlock = hotbarConfig[next].block;
-    updateHotbarSelection();
+    const n = HOTBAR_SLOTS;
+    selectedHotbarIndex =
+      e.deltaY > 0
+        ? (selectedHotbarIndex + 1) % n
+        : (selectedHotbarIndex - 1 + n) % n;
+    renderSlots();
   },
   { passive: false },
 );
@@ -808,13 +822,6 @@ const BLOCK_NAMES: Record<BlockId, string> = {
   [BLOCK.WATER_F2]: "WATER (flowing 2)",
   [BLOCK.WATER_F3]: "WATER (flowing 3)",
 };
-const CODE_TO_BLOCK: Record<string, BlockId> = {
-  Digit1: BLOCK.GRASS,
-  Digit2: BLOCK.STONE,
-  Digit3: BLOCK.SAND,
-  Digit4: BLOCK.WATER,
-};
-
 const hud = document.createElement("div");
 hud.style.cssText =
   "position:absolute;top:10px;left:10px;background:rgba(0,0,0,0.55);color:#fff;padding:10px 12px;font-family:sans-serif;font-size:13px;line-height:1.5;pointer-events:none;border-radius:4px;";
@@ -826,10 +833,7 @@ lockOverlay.style.cssText =
 lockOverlay.textContent = "Click to play";
 document.body.appendChild(lockOverlay);
 
-document.addEventListener("pointerlockchange", () => {
-  lockOverlay.style.display =
-    document.pointerLockElement === renderer.domElement ? "none" : "flex";
-});
+document.addEventListener("pointerlockchange", updateLockOverlay);
 
 const crosshair = document.createElement("div");
 crosshair.style.cssText =
@@ -840,39 +844,134 @@ crosshair.innerHTML = `
 `;
 document.body.appendChild(crosshair);
 
-// ホットバー（画面下中央）
-const hotbarConfig: { key: string; block: BlockId }[] = [
-  { key: "1", block: BLOCK.GRASS },
-  { key: "2", block: BLOCK.STONE },
-  { key: "3", block: BLOCK.SAND },
-  { key: "4", block: BLOCK.WATER },
-];
+// ホットバー（画面下中央）+ インベントリ（その上、E で開閉）
+const SLOT_CSS_BASE =
+  "width:60px;height:60px;display:flex;flex-direction:column;justify-content:space-between;padding:4px;box-sizing:border-box;color:white;font-family:sans-serif;font-size:11px;text-shadow:1px 1px 0 black;border-radius:4px;cursor:default;";
 
-const hotbar = document.createElement("div");
-hotbar.style.cssText =
+const hotbarEl = document.createElement("div");
+hotbarEl.style.cssText =
   "position:absolute;bottom:20px;left:50%;transform:translateX(-50%);display:flex;gap:6px;pointer-events:none;";
-document.body.appendChild(hotbar);
+document.body.appendChild(hotbarEl);
 
-const hotbarSlots = hotbarConfig.map(({ key, block }) => {
-  const [r, g, b] = blockColor(block);
-  const slot = document.createElement("div");
-  slot.style.cssText = `width:60px;height:60px;background:rgb(${r},${g},${b});display:flex;flex-direction:column;justify-content:space-between;padding:4px;box-sizing:border-box;color:white;font-family:sans-serif;font-size:11px;text-shadow:1px 1px 0 black;border-radius:4px;border:3px solid rgba(0,0,0,0.6);`;
-  slot.innerHTML = `<div style="font-weight:bold;">${key}</div><div style="text-align:center;font-size:10px;">${BLOCK_NAMES[block]}</div>`;
-  hotbar.appendChild(slot);
-  return slot;
-});
+const inventoryEl = document.createElement("div");
+inventoryEl.style.cssText =
+  "position:absolute;bottom:100px;left:50%;transform:translateX(-50%);display:none;grid-template-columns:repeat(9,60px);gap:6px;pointer-events:none;background:rgba(0,0,0,0.5);padding:10px;border-radius:8px;";
+document.body.appendChild(inventoryEl);
 
-function updateHotbarSelection() {
-  for (let i = 0; i < hotbarConfig.length; i++) {
-    hotbarSlots[i].style.border =
-      hotbarConfig[i].block === selectedBlock
+const heldItemEl = document.createElement("div");
+heldItemEl.style.cssText =
+  "position:absolute;width:44px;height:44px;border-radius:4px;display:none;pointer-events:none;z-index:1000;transform:translate(-50%,-50%);box-shadow:0 2px 6px rgba(0,0,0,0.6);";
+document.body.appendChild(heldItemEl);
+
+const slotEls: HTMLDivElement[] = [];
+for (let i = 0; i < TOTAL_SLOTS; i++) {
+  const el = document.createElement("div");
+  el.style.cssText = SLOT_CSS_BASE;
+  el.addEventListener("click", () => handleSlotClick(i));
+  slotEls.push(el);
+  if (i < HOTBAR_SLOTS) hotbarEl.appendChild(el);
+  else inventoryEl.appendChild(el);
+}
+
+function renderSlots() {
+  for (let i = 0; i < TOTAL_SLOTS; i++) {
+    const el = slotEls[i];
+    const item = inventory[i];
+    if (item !== null) {
+      const [r, g, b] = blockColor(item);
+      el.style.background = `rgb(${r},${g},${b})`;
+      el.innerHTML = `<div style="font-weight:bold;">${i < HOTBAR_SLOTS ? i + 1 : ""}</div><div style="text-align:center;font-size:10px;">${BLOCK_NAMES[item]}</div>`;
+    } else {
+      el.style.background = "rgba(0,0,0,0.3)";
+      el.innerHTML = `<div style="font-weight:bold;color:rgba(255,255,255,0.35);">${i < HOTBAR_SLOTS ? i + 1 : ""}</div>`;
+    }
+    if (i < HOTBAR_SLOTS) {
+      const sel = i === selectedHotbarIndex;
+      el.style.border = sel
         ? "3px solid white"
         : "3px solid rgba(0,0,0,0.6)";
-    hotbarSlots[i].style.transform =
-      hotbarConfig[i].block === selectedBlock ? "translateY(-4px)" : "none";
+      el.style.transform = sel ? "translateY(-4px)" : "none";
+    } else {
+      el.style.border = "3px solid rgba(0,0,0,0.6)";
+      el.style.transform = "none";
+    }
   }
 }
-updateHotbarSelection();
+
+function renderHeldItem() {
+  if (heldItem !== null) {
+    const [r, g, b] = blockColor(heldItem);
+    heldItemEl.style.background = `rgb(${r},${g},${b})`;
+    heldItemEl.style.display = "block";
+  } else {
+    heldItemEl.style.display = "none";
+  }
+}
+
+function handleSlotClick(index: number) {
+  if (!inventoryOpen) return;
+  const item = inventory[index];
+  if (heldItem === null) {
+    if (item !== null) {
+      heldItem = item;
+      inventory[index] = null;
+    }
+  } else {
+    inventory[index] = heldItem;
+    heldItem = item;
+  }
+  renderSlots();
+  renderHeldItem();
+}
+
+function updateLockOverlay() {
+  const locked = document.pointerLockElement === renderer.domElement;
+  lockOverlay.style.display = !locked && !inventoryOpen ? "flex" : "none";
+}
+
+function setInventoryOpen(open: boolean) {
+  if (inventoryOpen === open) return;
+  inventoryOpen = open;
+  inventoryEl.style.display = open ? "grid" : "none";
+  hotbarEl.style.pointerEvents = open ? "auto" : "none";
+  inventoryEl.style.pointerEvents = open ? "auto" : "none";
+
+  if (open) {
+    if (document.pointerLockElement === renderer.domElement) {
+      document.exitPointerLock();
+    }
+  } else {
+    // 持ち物を戻す: 最初の空きスロットへ
+    if (heldItem !== null) {
+      for (let i = 0; i < TOTAL_SLOTS; i++) {
+        if (inventory[i] === null) {
+          inventory[i] = heldItem;
+          heldItem = null;
+          break;
+        }
+      }
+      renderHeldItem();
+      renderSlots();
+    }
+    // 入力残骸クリア
+    pendingDX = 0;
+    pendingDY = 0;
+    // E キー（user gesture）で閉じている前提で pointer lock を再取得
+    // → "Click to play" オーバーレイなしに直接プレイ再開できる
+    renderer.domElement.requestPointerLock();
+  }
+  updateLockOverlay();
+}
+
+document.addEventListener("mousemove", (e) => {
+  if (heldItem !== null) {
+    heldItemEl.style.left = e.clientX + "px";
+    heldItemEl.style.top = e.clientY + "px";
+  }
+});
+
+renderSlots();
+renderHeldItem();
 
 function updateHud() {
   const viewLabel =
@@ -885,16 +984,27 @@ function updateHud() {
     View: <b>${viewLabel}</b> (F5)<br>
     WASD = move, Space = jump<br>
     Left click = break / Right click = place<br>
-    1-4 = select block / ESC = release cursor
+    1-9 = select slot, wheel = cycle<br>
+    E = open inventory / ESC = release cursor
   `.trim();
 }
 updateHud();
 
 document.addEventListener("keydown", (e) => {
-  const block = CODE_TO_BLOCK[e.code];
-  if (block !== undefined) {
-    selectedBlock = block;
-    updateHotbarSelection();
+  // 1〜9 でホットバー選択
+  if (/^Digit[1-9]$/.test(e.code)) {
+    selectedHotbarIndex = Number(e.code.slice(5)) - 1;
+    renderSlots();
+    return;
+  }
+  if (e.code === "KeyE") {
+    e.preventDefault();
+    setInventoryOpen(!inventoryOpen);
+    return;
+  }
+  if (e.code === "Escape" && inventoryOpen) {
+    setInventoryOpen(false);
+    return;
   }
   if (e.code === "F5") {
     e.preventDefault();
@@ -922,6 +1032,24 @@ function update(dt: number) {
   const pcz = Math.floor(player.z / CHUNK_SIZE_Z);
   if (!chunkBlocks.has(chunkKey(pcx, pcz))) {
     loadChunk(pcx, pcz);
+  }
+
+  // インベントリ開いてる時は入力をスキップ（マウス累積はクリア）
+  if (inventoryOpen) {
+    pendingDX = 0;
+    pendingDY = 0;
+    player.vx = 0;
+    player.vz = 0;
+    player.vy += GRAVITY * dt;
+    if (player.vy < TERMINAL_VELOCITY) player.vy = TERMINAL_VELOCITY;
+    moveAndCollide(player, isSolid, dt);
+    updatePlayerAnimation(dt);
+    waterTickAcc += dt;
+    while (waterTickAcc >= WATER_TICK_INTERVAL) {
+      waterTick();
+      waterTickAcc -= WATER_TICK_INTERVAL;
+    }
+    return;
   }
 
   // マウス → ヨー/ピッチ
