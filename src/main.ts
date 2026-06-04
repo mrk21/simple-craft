@@ -425,43 +425,101 @@ const isSolid: IsSolidAt = (wx, wy, wz) => {
   return blockKind(blocks[idx(c.lx, c.y, c.lz)] as BlockId) === "opaque";
 };
 
-// プレイヤーエンティティ（MC Steve 風の 6 ボックス）
+// プレイヤーエンティティ（MC Steve 風の 6 ボックス、腕脚は関節で振れる）
 // 高さ 1.8 を [脚 0~0.65][胴 0.65~1.3][頭 1.3~1.8] に配分
-function makeBodyPart(
-  w: number,
-  h: number,
-  d: number,
-  color: number,
-  x: number,
-  yCenter: number,
-  z: number,
-): THREE.Mesh {
-  const geo = new THREE.BoxGeometry(w, h, d);
-  const mat = new THREE.MeshLambertMaterial({ color });
-  const mesh = new THREE.Mesh(geo, mat);
-  mesh.position.set(x, yCenter, z);
-  return mesh;
-}
-
 const SKIN_COLOR = 0xeebd9e;
 const SHIRT_COLOR = 0x3b7eb3;
 const PANTS_COLOR = 0x2a4670;
 
+function makeBox(
+  w: number,
+  h: number,
+  d: number,
+  color: number,
+): THREE.Mesh {
+  const geo = new THREE.BoxGeometry(w, h, d);
+  const mat = new THREE.MeshLambertMaterial({ color });
+  return new THREE.Mesh(geo, mat);
+}
+
+// 関節 (joint) を pivot に持つ手足
+// メッシュ自体は -h/2 にオフセットして joint からぶら下がる形にする
+function makeLimb(
+  w: number,
+  h: number,
+  d: number,
+  color: number,
+  pivotX: number,
+  pivotY: number,
+  pivotZ: number,
+): THREE.Group {
+  const group = new THREE.Group();
+  const mesh = makeBox(w, h, d, color);
+  mesh.position.y = -h / 2;
+  group.add(mesh);
+  group.position.set(pivotX, pivotY, pivotZ);
+  return group;
+}
+
 const playerGroup = new THREE.Group();
-// 頭 0.5×0.5×0.5、中心 y=1.55
-playerGroup.add(makeBodyPart(0.5, 0.5, 0.5, SKIN_COLOR, 0, 1.55, 0));
-// 胴 0.5×0.65×0.25、中心 y=0.975
-playerGroup.add(makeBodyPart(0.5, 0.65, 0.25, SHIRT_COLOR, 0, 0.975, 0));
-// 左腕 0.2×0.65×0.25、x=-0.35
-playerGroup.add(makeBodyPart(0.2, 0.65, 0.25, SKIN_COLOR, -0.35, 0.975, 0));
-// 右腕 0.2×0.65×0.25、x=+0.35
-playerGroup.add(makeBodyPart(0.2, 0.65, 0.25, SKIN_COLOR, 0.35, 0.975, 0));
-// 左脚 0.2×0.65×0.25、x=-0.1
-playerGroup.add(makeBodyPart(0.2, 0.65, 0.25, PANTS_COLOR, -0.1, 0.325, 0));
-// 右脚 0.2×0.65×0.25、x=+0.1
-playerGroup.add(makeBodyPart(0.2, 0.65, 0.25, PANTS_COLOR, 0.1, 0.325, 0));
+
+// 頭 0.5x0.5x0.5、中心 y=1.55（固定）
+const playerHead = makeBox(0.5, 0.5, 0.5, SKIN_COLOR);
+playerHead.position.set(0, 1.55, 0);
+playerGroup.add(playerHead);
+
+// 胴 0.5x0.65x0.25、中心 y=0.975（固定）
+const playerBody = makeBox(0.5, 0.65, 0.25, SHIRT_COLOR);
+playerBody.position.set(0, 0.975, 0);
+playerGroup.add(playerBody);
+
+// 腕: 肩 (y=1.3) を pivot に
+const leftArm = makeLimb(0.2, 0.65, 0.25, SKIN_COLOR, -0.35, 1.3, 0);
+const rightArm = makeLimb(0.2, 0.65, 0.25, SKIN_COLOR, 0.35, 1.3, 0);
+// 脚: 股関節 (y=0.65) を pivot に
+const leftLeg = makeLimb(0.2, 0.65, 0.25, PANTS_COLOR, -0.1, 0.65, 0);
+const rightLeg = makeLimb(0.2, 0.65, 0.25, PANTS_COLOR, 0.1, 0.65, 0);
+playerGroup.add(leftArm, rightArm, leftLeg, rightLeg);
+
 scene.add(playerGroup);
 playerGroup.visible = false; // 一人称ではデフォルト非表示
+
+// アニメーション状態
+let walkPhase = 0;
+let walkSwingAmount = 0; // 0..1、移動中に増加・停止時に減衰
+const WALK_SWING_MAX = 0.6; // ラジアン
+const ARM_SWING_DURATION = 0.25; // 採掘/設置で腕を振る時間
+let armSwingTime = -1; // -1 = アニメなし
+
+function updatePlayerAnimation(dt: number) {
+  // 歩行スイング
+  const horizSpeed = Math.hypot(player.vx, player.vz);
+  const walking = horizSpeed > 0.1 && player.onGround;
+  if (walking) {
+    walkSwingAmount = Math.min(1, walkSwingAmount + dt * 6);
+    walkPhase += dt * horizSpeed * 1.8;
+  } else {
+    walkSwingAmount = Math.max(0, walkSwingAmount - dt * 6);
+  }
+  const swing = Math.sin(walkPhase) * WALK_SWING_MAX * walkSwingAmount;
+  leftArm.rotation.x = swing;
+  rightLeg.rotation.x = swing;
+  rightArm.rotation.x = -swing;
+  leftLeg.rotation.x = -swing;
+
+  // 腕振り（採掘・設置）: 右腕に上書き
+  if (armSwingTime >= 0) {
+    armSwingTime += dt;
+    if (armSwingTime >= ARM_SWING_DURATION) {
+      armSwingTime = -1;
+    } else {
+      const t = armSwingTime / ARM_SWING_DURATION;
+      // 0 → 1 → 0 のサインスイング、前方向（負の X 回転）
+      const sw = Math.sin(t * Math.PI) * 1.4;
+      rightArm.rotation.x = -sw;
+    }
+  }
+}
 
 // 視点モード
 type ViewMode = "first" | "third-back" | "third-front";
@@ -709,6 +767,9 @@ window.addEventListener("mousedown", (e) => {
   if (document.pointerLockElement !== renderer.domElement) return;
   const hit = pickHit();
   if (!hit) return;
+  if (e.button === 0 || e.button === 2) {
+    armSwingTime = 0; // 腕振りトリガー（クリック時点で必ず）
+  }
   if (e.button === 0) modifyBlock(hit, false);
   if (e.button === 2) modifyBlock(hit, true);
 });
@@ -857,6 +918,9 @@ function update(dt: number) {
   }
 
   moveAndCollide(player, isSolid, dt);
+
+  // プレイヤーアニメ
+  updatePlayerAnimation(dt);
 
   // 水流ティック（5Hz）
   waterTickAcc += dt;
