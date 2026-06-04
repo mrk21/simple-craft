@@ -89,14 +89,17 @@ import {
   type ViewMode,
 } from "./core/camera";
 import { createTouchControls, isTouchDevice } from "./core/touch-controls";
+import { showTitleScreen } from "./ui/title-screen";
 import {
   createCrosshair,
   createHudTextOverlay,
-  createLockOverlay,
+  createPauseOverlay,
 } from "./ui/hud";
 import { createInventoryUi } from "./ui/inventory-ui";
 
-const SEED = 12345;
+// シードはタイトル画面 or URL ?seed=N で決まる（bootstrap() 内で代入）
+let SEED = 0;
+let WORLD_NAME = "";
 const VIEW_RADIUS = 3; // プレイヤーから ±VIEW_RADIUS チャンク = (2R+1)^2 がロード対象
 const INITIAL_RADIUS = 1; // 起動時に同期ロードする範囲
 
@@ -174,7 +177,18 @@ const chunkMeshes = new Map<string, ChunkMeshes>();
 // インベントリ + ドロップアイテムは ./game/item に分離
 const inv = createInventoryState();
 const droppedItems: DroppedItem[] = [];
-let inventoryOpen = false;
+
+// ============================================================
+// ゲーム状態（state machine）
+//   title      … タイトル画面表示中。ゲームループ停止・キーボードショートカット無効
+//   playing    … 通常プレイ
+//   paused     … ポーズ画面表示中（プレイヤー入力凍結）
+//   inventory  … インベントリ画面表示中（プレイヤー入力凍結）
+// ============================================================
+type GameState = "title" | "playing" | "paused" | "inventory";
+// 初期値は cast を挟む: そうしないと TS の control-flow narrowing が "title" 固定だと推論し、
+// 各クロージャ内で gameState !== "playing" が常に true 扱いになってしまう
+let gameState: GameState = "title" as GameState;
 
 function chunkKey(cx: number, cz: number): string {
   return `${cx},${cz}`;
@@ -416,12 +430,7 @@ chunkWorker.onmessage = (e: MessageEvent<ChunkWorkerResponse>) => {
   }
 };
 
-// 起動時: スポーン周辺だけ同期ロード（重力着地用の地面確保）
-for (let cz = -INITIAL_RADIUS; cz <= INITIAL_RADIUS; cz++) {
-  for (let cx = -INITIAL_RADIUS; cx <= INITIAL_RADIUS; cx++) {
-    loadChunk(cx, cz);
-  }
-}
+// スポーン周辺の初期ロードは enterGame() で（SEED 確定後に実行する）
 
 // 毎フレーム: プレイヤー位置に基づきロード/アンロードを進める
 let lastPlayerChunkX = Number.NaN;
@@ -723,7 +732,7 @@ function modifyBlock(hit: THREE.Intersection, place: boolean) {
 }
 
 window.addEventListener("mousedown", (e) => {
-  if (inventoryOpen) return; // インベントリ操作はスロットの click ハンドラ側
+  if (gameState !== "playing") return;
   if (document.pointerLockElement !== renderer.domElement) return;
   const hit = pickHit();
   if (!hit) return;
@@ -738,7 +747,7 @@ window.addEventListener("mousedown", (e) => {
 window.addEventListener(
   "wheel",
   (e) => {
-    if (inventoryOpen) return;
+    if (gameState !== "playing") return;
     if (document.pointerLockElement !== renderer.domElement) return;
     if (e.deltaY === 0) return;
     e.preventDefault();
@@ -769,14 +778,18 @@ const BLOCK_NAMES: Record<BlockId, string> = {
 };
 
 const hudOverlay = createHudTextOverlay();
-const lockOverlay = createLockOverlay("Click to play");
 createCrosshair();
+
+const pauseOverlay = createPauseOverlay({
+  onResume: () => resumeFromPause(),
+  onReturnToTitle: () => void returnToTitle(),
+});
 
 const inventoryUi = createInventoryUi({
   blockNames: BLOCK_NAMES,
   atlasCanvas,
   onSlotClick: (index) => {
-    if (!inventoryOpen) return;
+    if (gameState !== "inventory") return;
     swapOrMergeSlot(inv, index);
     inventoryUi.renderSlots(inv);
     inventoryUi.renderHeld(inv.heldItem);
@@ -794,51 +807,139 @@ function renderHeldItem() {
   inventoryUi.renderHeld(inv.heldItem);
 }
 
-function updateLockOverlay() {
-  if (touchEnabled) {
-    lockOverlay.setVisible(false);
-    return;
-  }
-  const locked = document.pointerLockElement === renderer.domElement;
-  lockOverlay.setVisible(!locked && !inventoryOpen);
+function updatePauseVisibility() {
+  pauseOverlay.setVisible(gameState === "paused");
 }
 
-document.addEventListener("pointerlockchange", updateLockOverlay);
-// 起動直後に一度だけ反映（タッチデバイスは pointerlockchange が発火しないため）
-updateLockOverlay();
+// デスクトップ: pointer-lock が解除されたら paused、再取得されたら playing
+// インベントリ中は触らない（インベントリ開閉時に exitPointerLock で発火するので衝突する）
+document.addEventListener("pointerlockchange", () => {
+  if (touchEnabled) return;
+  if (gameState === "title" || gameState === "inventory") return;
+  const locked = document.pointerLockElement === renderer.domElement;
+  gameState = locked ? "playing" : "paused";
+  updatePauseVisibility();
+});
+updatePauseVisibility();
+
+function resumeFromPause() {
+  if (gameState !== "paused") return;
+  gameState = "playing";
+  updatePauseVisibility();
+  if (!touchEnabled) {
+    renderer.domElement.requestPointerLock();
+  }
+}
+
+async function returnToTitle() {
+  // アニメーション停止
+  renderer.setAnimationLoop(null);
+  // タッチコントロール破棄（タイトル画面のタップと干渉しないように）
+  teardownTouchControls();
+  // チャンクメッシュ破棄
+  for (const meshes of chunkMeshes.values()) {
+    if (meshes.opaque) {
+      scene.remove(meshes.opaque);
+      meshes.opaque.geometry.dispose();
+    }
+    if (meshes.water) {
+      scene.remove(meshes.water);
+      meshes.water.geometry.dispose();
+    }
+  }
+  chunkMeshes.clear();
+  chunkBlocks.clear();
+  pendingRequests.clear();
+  // ドロップアイテム破棄
+  for (const item of droppedItems) disposeDroppedItem(item, scene);
+  droppedItems.length = 0;
+  // 水流状態
+  waterFlow.pending.clear();
+  waterFlow.tickAcc = 0;
+  // プレイヤー状態
+  player.x = 0.5;
+  player.y = 100;
+  player.z = 0.5;
+  player.vx = 0;
+  player.vy = 0;
+  player.vz = 0;
+  player.onGround = false;
+  yaw = 0;
+  pitch = 0;
+  lastPlayerChunkX = Number.NaN;
+  lastPlayerChunkZ = Number.NaN;
+  // インベントリ
+  const fresh = createInventoryState();
+  inv.slots.splice(0, inv.slots.length, ...fresh.slots);
+  inv.selectedHotbarIndex = fresh.selectedHotbarIndex;
+  inv.heldItem = fresh.heldItem;
+  inventoryUi.setInventoryOpen(false);
+  inventoryUi.setInteractive(false);
+  renderSlots();
+  renderHeldItem();
+  // 視点モード
+  viewMode = "first";
+  setPlayerEntityVisible(playerEntity, false);
+  // タイトルへ
+  gameState = "title";
+  updatePauseVisibility();
+  const sel = await showTitleScreen();
+  SEED = sel.seed;
+  WORLD_NAME = sel.name;
+  enterGame();
+}
 
 // ============================================================
 // タッチ操作（スマホ・タブレット）
 // ============================================================
 
-if (touchEnabled) {
-  createTouchControls(renderer.domElement, input, {
+// タッチコントロールは enterGame() で初期化、returnToTitle() で破棄。
+// タイトル画面表示中は canvas に touch リスナーを貼らない（iOS でのタップ干渉防止）
+let touchControlsHandle: ReturnType<typeof createTouchControls> | null = null;
+function setupTouchControls(): void {
+  if (!touchEnabled || touchControlsHandle !== null) return;
+  touchControlsHandle = createTouchControls(renderer.domElement, input, {
     onTapPlace: () => {
-      if (inventoryOpen) return;
+      if (gameState !== "playing") return;
       const hit = pickHit();
       if (!hit) return;
       triggerArmSwing(playerEntity);
       modifyBlock(hit, true);
     },
     onLongPressBreak: () => {
-      if (inventoryOpen) return;
+      if (gameState !== "playing") return;
       const hit = pickHit();
       if (!hit) return;
       triggerArmSwing(playerEntity);
       modifyBlock(hit, false);
     },
-    onInventoryToggle: () => setInventoryOpen(!inventoryOpen),
+    onInventoryToggle: () =>
+      setInventoryOpen(gameState !== "inventory"),
     onViewToggle: () => {
+      if (gameState !== "playing" && gameState !== "inventory") return;
       viewMode = nextViewMode(viewMode);
       setPlayerEntityVisible(playerEntity, viewMode !== "first");
       updateHud();
     },
+    onPause: () => {
+      if (gameState !== "playing") return;
+      gameState = "paused";
+      updatePauseVisibility();
+    },
   });
+}
+function teardownTouchControls(): void {
+  if (touchControlsHandle === null) return;
+  touchControlsHandle.dispose();
+  touchControlsHandle = null;
 }
 
 function setInventoryOpen(open: boolean) {
-  if (inventoryOpen === open) return;
-  inventoryOpen = open;
+  const currentlyOpen = gameState === "inventory";
+  if (currentlyOpen === open) return;
+  // インベントリは playing からのみ開ける（タイトル・ポーズ中は無効）
+  if (open && gameState !== "playing") return;
+  gameState = open ? "inventory" : "playing";
   inventoryUi.setInventoryOpen(open);
   inventoryUi.setInteractive(open);
 
@@ -859,7 +960,7 @@ function setInventoryOpen(open: boolean) {
       renderer.domElement.requestPointerLock();
     }
   }
-  updateLockOverlay();
+  updatePauseVisibility();
 }
 
 document.addEventListener("mousemove", (e) => {
@@ -878,16 +979,17 @@ function updateHud() {
       : viewMode === "third-back"
         ? "third-person (back)"
         : "third-person (front)";
+  const worldLabel = WORLD_NAME ? `${WORLD_NAME} (seed ${SEED})` : `seed ${SEED}`;
   if (touchEnabled) {
     hudOverlay.setHTML(`
-      View: <b>${viewLabel}</b><br>
+      <b>${worldLabel}</b> · ${viewLabel}<br>
       Left joystick = move / Jump button = jump<br>
       Tap = place / Long-press = break<br>
       Tap hotbar = select / ≡ = inventory / ◐ = view
     `.trim());
   } else {
     hudOverlay.setHTML(`
-      View: <b>${viewLabel}</b> (F5)<br>
+      <b>${worldLabel}</b> · ${viewLabel} (F5)<br>
       WASD = move, Space = jump<br>
       Left click = break / Right click = place<br>
       1-9 = select slot, wheel = cycle<br>
@@ -895,9 +997,11 @@ function updateHud() {
     `.trim());
   }
 }
-updateHud();
 
 document.addEventListener("keydown", (e) => {
+  // ゲーム中（プレイ or インベントリ）のショートカットのみ。
+  // タイトル画面・ポーズ中は無効 → <input> でのキー入力と衝突しない
+  if (gameState !== "playing" && gameState !== "inventory") return;
   // 1〜9 でホットバー選択
   if (/^Digit[1-9]$/.test(e.code)) {
     inv.selectedHotbarIndex = Number(e.code.slice(5)) - 1;
@@ -906,10 +1010,10 @@ document.addEventListener("keydown", (e) => {
   }
   if (e.code === "KeyE") {
     e.preventDefault();
-    setInventoryOpen(!inventoryOpen);
+    setInventoryOpen(gameState !== "inventory");
     return;
   }
-  if (e.code === "Escape" && inventoryOpen) {
+  if (e.code === "Escape" && gameState === "inventory") {
     setInventoryOpen(false);
     return;
   }
@@ -941,8 +1045,8 @@ function update(dt: number) {
     loadChunk(pcx, pcz);
   }
 
-  // インベントリ開いてる時は入力をスキップ（マウス累積はクリア）
-  if (inventoryOpen) {
+  // インベントリ開いてる or ポーズ中はプレイヤー入力をスキップ（マウス累積はクリア）
+  if (gameState !== "playing") {
     discardMouseDelta(input);
     player.vx = 0;
     player.vz = 0;
@@ -1070,15 +1174,52 @@ window.addEventListener("resize", () => {
   renderer.setSize(window.innerWidth, window.innerHeight);
 });
 
-renderer.setAnimationLoop((nowMs) => {
-  let dt = (nowMs - lastTime) / 1000;
-  lastTime = nowMs;
-  dt = Math.min(dt, MAX_FRAME_DT);
+// ============================================================
+// ブートストラップ: タイトル画面 → ワールド選択 → ゲーム開始
+// ============================================================
 
-  accumulator += dt;
-  while (accumulator >= FIXED_DT) {
-    update(FIXED_DT);
-    accumulator -= FIXED_DT;
+function enterGame(): void {
+  setupTouchControls();
+  updateHud();
+  // スポーン周辺だけ同期ロード（重力着地用の地面確保）
+  for (let cz = -INITIAL_RADIUS; cz <= INITIAL_RADIUS; cz++) {
+    for (let cx = -INITIAL_RADIUS; cx <= INITIAL_RADIUS; cx++) {
+      loadChunk(cx, cz);
+    }
   }
-  render();
-});
+  // デスクトップは pointer-lock 取得待ち = ポーズ。タッチはそのままプレイ
+  gameState = touchEnabled ? "playing" : "paused";
+  updatePauseVisibility();
+  lastTime = performance.now();
+  renderer.setAnimationLoop((nowMs) => {
+    let dt = (nowMs - lastTime) / 1000;
+    lastTime = nowMs;
+    dt = Math.min(dt, MAX_FRAME_DT);
+    accumulator += dt;
+    while (accumulator >= FIXED_DT) {
+      update(FIXED_DT);
+      accumulator -= FIXED_DT;
+    }
+    render();
+  });
+}
+
+async function bootstrap(): Promise<void> {
+  // ?seed=N があればタイトル省略（開発用ショートカット）
+  const raw = new URLSearchParams(window.location.search).get("seed");
+  if (raw !== null) {
+    const n = Number(raw);
+    if (Number.isFinite(n) && n >= 0) {
+      SEED = Math.floor(n) >>> 0;
+      WORLD_NAME = `URL seed ${SEED}`;
+      enterGame();
+      return;
+    }
+  }
+  const sel = await showTitleScreen();
+  SEED = sel.seed;
+  WORLD_NAME = sel.name;
+  enterGame();
+}
+
+void bootstrap();

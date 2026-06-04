@@ -11,6 +11,7 @@ export interface TouchActionHandlers {
   onLongPressBreak: () => void;
   onInventoryToggle: () => void;
   onViewToggle: () => void;
+  onPause: () => void;
 }
 
 export interface TouchControls {
@@ -124,9 +125,15 @@ export function createTouchControls(
     52,
     "top:max(20px, env(safe-area-inset-top, 0px));right:calc(max(20px, env(safe-area-inset-right, 0px)) + 64px);",
   );
+  const pauseBtn = makeButton(
+    "❚❚",
+    52,
+    "top:max(20px, env(safe-area-inset-top, 0px));right:calc(max(20px, env(safe-area-inset-right, 0px)) + 128px);",
+  );
   root.appendChild(jumpBtn);
   root.appendChild(invBtn);
   root.appendChild(viewBtn);
+  root.appendChild(pauseBtn);
 
   attachHeldButton(
     jumpBtn,
@@ -135,6 +142,7 @@ export function createTouchControls(
   );
   attachButtonAction(invBtn, handlers.onInventoryToggle);
   attachButtonAction(viewBtn, handlers.onViewToggle);
+  attachButtonAction(pauseBtn, handlers.onPause);
 
   // --------------------------------------------------
   // タッチトラッキング: ジョイスティック / look を別 ID で
@@ -279,18 +287,21 @@ export function createTouchControls(
     for (const t of Array.from(e.changedTouches)) endTouch(t);
   }
 
-  document.addEventListener("touchstart", onTouchStart, { passive: false });
-  document.addEventListener("touchmove", onTouchMove, { passive: false });
-  document.addEventListener("touchend", onTouchEnd, { passive: false });
-  document.addEventListener("touchcancel", onTouchEnd, { passive: false });
+  // ⚠️ document/window に passive:false の touchstart を貼ると iOS WebKit が
+  // 配下要素（タイトル画面の <button> 等）の click 合成を抑制してしまうので、
+  // 必ず canvas 上だけに貼る
+  canvasEl.addEventListener("touchstart", onTouchStart, { passive: false });
+  canvasEl.addEventListener("touchmove", onTouchMove, { passive: false });
+  canvasEl.addEventListener("touchend", onTouchEnd, { passive: false });
+  canvasEl.addEventListener("touchcancel", onTouchEnd, { passive: false });
 
   return {
     rootEl: root,
     dispose: () => {
-      document.removeEventListener("touchstart", onTouchStart);
-      document.removeEventListener("touchmove", onTouchMove);
-      document.removeEventListener("touchend", onTouchEnd);
-      document.removeEventListener("touchcancel", onTouchEnd);
+      canvasEl.removeEventListener("touchstart", onTouchStart);
+      canvasEl.removeEventListener("touchmove", onTouchMove);
+      canvasEl.removeEventListener("touchend", onTouchEnd);
+      canvasEl.removeEventListener("touchcancel", onTouchEnd);
       root.remove();
     },
   };
