@@ -1,19 +1,19 @@
-import * as THREE from 'three';
-import { generateBlocks, generateHeightmap } from './world/generator';
+import * as THREE from "three";
+import { generateBlocks, generateHeightmap } from "./world/generator";
 import {
   meshChunk,
   meshChunkWater,
   type ChunkMesh,
   type NeighborBlockAt,
-} from './render/mesher';
+} from "./render/mesher";
 import {
   CHUNK_SIZE_X,
   CHUNK_SIZE_Y,
   CHUNK_SIZE_Z,
   idx,
   worldToChunkLocal,
-} from './world/chunk';
-import { BLOCK, type BlockId, blockKind } from './world/block';
+} from "./world/chunk";
+import { BLOCK, type BlockId, blockKind } from "./world/block";
 import {
   GRAVITY,
   JUMP_VELOCITY,
@@ -25,10 +25,11 @@ import {
   moveAndCollide,
   type IsSolidAt,
   type PlayerState,
-} from './game/physics';
+} from "./game/physics";
 
 const SEED = 12345;
-const CHUNK_RADIUS = 1;
+const VIEW_RADIUS = 3; // プレイヤーから ±VIEW_RADIUS チャンク = (2R+1)^2 がロード対象
+const INITIAL_RADIUS = 1; // 起動時に同期ロードする範囲
 
 // ============================================================
 // シーン
@@ -36,7 +37,8 @@ const CHUNK_RADIUS = 1;
 
 const scene = new THREE.Scene();
 scene.background = new THREE.Color(0x87ceeb);
-scene.fog = new THREE.Fog(0x87ceeb, 80, 200);
+// VIEW_RADIUS=3, CHUNK_SIZE=16 → 視野端まで ~50 ブロック。フォグを合わせて pop-in を隠す
+scene.fog = new THREE.Fog(0x87ceeb, 30, 70);
 
 const camera = new THREE.PerspectiveCamera(
   70,
@@ -44,7 +46,7 @@ const camera = new THREE.PerspectiveCamera(
   0.1,
   1000,
 );
-camera.rotation.order = 'YXZ';
+camera.rotation.order = "YXZ";
 
 const renderer = new THREE.WebGLRenderer({ antialias: true });
 renderer.setPixelRatio(window.devicePixelRatio);
@@ -82,9 +84,9 @@ function chunkKey(cx: number, cz: number): string {
 
 function buildGeometry(mesh: ChunkMesh): THREE.BufferGeometry {
   const g = new THREE.BufferGeometry();
-  g.setAttribute('position', new THREE.BufferAttribute(mesh.positions, 3));
-  g.setAttribute('normal', new THREE.BufferAttribute(mesh.normals, 3));
-  g.setAttribute('color', new THREE.BufferAttribute(mesh.colors, 3, true));
+  g.setAttribute("position", new THREE.BufferAttribute(mesh.positions, 3));
+  g.setAttribute("normal", new THREE.BufferAttribute(mesh.normals, 3));
+  g.setAttribute("color", new THREE.BufferAttribute(mesh.colors, 3, true));
   g.setIndex(new THREE.BufferAttribute(mesh.indices, 1));
   return g;
 }
@@ -96,10 +98,22 @@ function makeNeighborLookup(cx: number, cz: number): NeighborBlockAt {
     let nz = cz;
     let lx = x;
     let lz = z;
-    if (x < 0) { nx -= 1; lx = CHUNK_SIZE_X - 1; }
-    if (x >= CHUNK_SIZE_X) { nx += 1; lx = 0; }
-    if (z < 0) { nz -= 1; lz = CHUNK_SIZE_Z - 1; }
-    if (z >= CHUNK_SIZE_Z) { nz += 1; lz = 0; }
+    if (x < 0) {
+      nx -= 1;
+      lx = CHUNK_SIZE_X - 1;
+    }
+    if (x >= CHUNK_SIZE_X) {
+      nx += 1;
+      lx = 0;
+    }
+    if (z < 0) {
+      nz -= 1;
+      lz = CHUNK_SIZE_Z - 1;
+    }
+    if (z >= CHUNK_SIZE_Z) {
+      nz += 1;
+      lz = 0;
+    }
     const blocks = chunkBlocks.get(chunkKey(nx, nz));
     if (!blocks) return BLOCK.AIR;
     return blocks[idx(lx, y, lz)] as BlockId;
@@ -143,17 +157,113 @@ function rebuildChunkMeshes(cx: number, cz: number) {
   chunkMeshes.set(key, next);
 }
 
-// ワールド生成
-for (let cz = -CHUNK_RADIUS; cz <= CHUNK_RADIUS; cz++) {
-  for (let cx = -CHUNK_RADIUS; cx <= CHUNK_RADIUS; cx++) {
-    const heightmap = generateHeightmap(cx, cz, SEED);
-    chunkBlocks.set(chunkKey(cx, cz), generateBlocks(heightmap));
+// チャンクのロード: ブロック生成 + メッシュ構築 + 隣接メッシュ再構築
+function loadChunk(cx: number, cz: number) {
+  const key = chunkKey(cx, cz);
+  if (chunkBlocks.has(key)) return;
+
+  const heightmap = generateHeightmap(cx, cz, SEED);
+  chunkBlocks.set(key, generateBlocks(heightmap));
+  rebuildChunkMeshes(cx, cz);
+
+  // 隣接チャンクは境界面の culling が変わるので再 mesh
+  const neighbors = [
+    [cx + 1, cz],
+    [cx - 1, cz],
+    [cx, cz + 1],
+    [cx, cz - 1],
+  ] as const;
+  for (const [ncx, ncz] of neighbors) {
+    if (chunkBlocks.has(chunkKey(ncx, ncz))) {
+      rebuildChunkMeshes(ncx, ncz);
+    }
   }
 }
-for (let cz = -CHUNK_RADIUS; cz <= CHUNK_RADIUS; cz++) {
-  for (let cx = -CHUNK_RADIUS; cx <= CHUNK_RADIUS; cx++) {
-    rebuildChunkMeshes(cx, cz);
+
+// チャンクのアンロード: メッシュ・データ破棄 + 隣接メッシュ再構築（壁面復活）
+function unloadChunk(cx: number, cz: number) {
+  const key = chunkKey(cx, cz);
+  const meshes = chunkMeshes.get(key);
+  if (meshes) {
+    if (meshes.opaque) {
+      scene.remove(meshes.opaque);
+      meshes.opaque.geometry.dispose();
+    }
+    if (meshes.water) {
+      scene.remove(meshes.water);
+      meshes.water.geometry.dispose();
+    }
   }
+  chunkMeshes.delete(key);
+  chunkBlocks.delete(key);
+
+  const neighbors = [
+    [cx + 1, cz],
+    [cx - 1, cz],
+    [cx, cz + 1],
+    [cx, cz - 1],
+  ] as const;
+  for (const [ncx, ncz] of neighbors) {
+    if (chunkBlocks.has(chunkKey(ncx, ncz))) {
+      rebuildChunkMeshes(ncx, ncz);
+    }
+  }
+}
+
+// 起動時: スポーン周辺だけ同期ロード（重力着地用の地面確保）
+for (let cz = -INITIAL_RADIUS; cz <= INITIAL_RADIUS; cz++) {
+  for (let cx = -INITIAL_RADIUS; cx <= INITIAL_RADIUS; cx++) {
+    loadChunk(cx, cz);
+  }
+}
+
+// 毎フレーム: プレイヤー位置に基づきロード/アンロードを進める
+let lastPlayerChunkX = Number.NaN;
+let lastPlayerChunkZ = Number.NaN;
+
+function updateWorld() {
+  const pcx = Math.floor(player.x / CHUNK_SIZE_X);
+  const pcz = Math.floor(player.z / CHUNK_SIZE_Z);
+  const chunkChanged =
+    pcx !== lastPlayerChunkX || pcz !== lastPlayerChunkZ;
+  lastPlayerChunkX = pcx;
+  lastPlayerChunkZ = pcz;
+
+  // アンロードはプレイヤーチャンクが変化した瞬間のみ
+  if (chunkChanged) {
+    const toUnload: [number, number][] = [];
+    for (const key of chunkBlocks.keys()) {
+      const [cx, cz] = key.split(",").map(Number);
+      if (
+        Math.abs(cx - pcx) > VIEW_RADIUS ||
+        Math.abs(cz - pcz) > VIEW_RADIUS
+      ) {
+        toUnload.push([cx, cz]);
+      }
+    }
+    for (const [cx, cz] of toUnload) unloadChunk(cx, cz);
+  }
+
+  // ロード対象を1つだけ（最も近い未ロード）処理
+  let bestCx = 0;
+  let bestCz = 0;
+  let bestDist = Infinity;
+  let found = false;
+  for (let dz = -VIEW_RADIUS; dz <= VIEW_RADIUS; dz++) {
+    for (let dx = -VIEW_RADIUS; dx <= VIEW_RADIUS; dx++) {
+      const cx = pcx + dx;
+      const cz = pcz + dz;
+      if (chunkBlocks.has(chunkKey(cx, cz))) continue;
+      const dist = dx * dx + dz * dz;
+      if (dist < bestDist) {
+        bestDist = dist;
+        bestCx = cx;
+        bestCz = cz;
+        found = true;
+      }
+    }
+  }
+  if (found) loadChunk(bestCx, bestCz);
 }
 
 // ============================================================
@@ -176,7 +286,7 @@ const isSolid: IsSolidAt = (wx, wy, wz) => {
   if (!c) return false;
   const blocks = chunkBlocks.get(chunkKey(c.cx, c.cz));
   if (!blocks) return false;
-  return blockKind(blocks[idx(c.lx, c.y, c.lz)] as BlockId) === 'opaque';
+  return blockKind(blocks[idx(c.lx, c.y, c.lz)] as BlockId) === "opaque";
 };
 
 // ============================================================
@@ -184,9 +294,9 @@ const isSolid: IsSolidAt = (wx, wy, wz) => {
 // ============================================================
 
 const keys = new Set<string>();
-window.addEventListener('keydown', (e) => keys.add(e.code));
-window.addEventListener('keyup', (e) => keys.delete(e.code));
-window.addEventListener('blur', () => keys.clear()); // フォーカス外れたら全部リセット
+window.addEventListener("keydown", (e) => keys.add(e.code));
+window.addEventListener("keyup", (e) => keys.delete(e.code));
+window.addEventListener("blur", () => keys.clear()); // フォーカス外れたら全部リセット
 
 // マウス（pointer lock 中のみ累積）
 let yaw = 0;
@@ -195,14 +305,14 @@ const MOUSE_SENSITIVITY = 0.002;
 let pendingDX = 0;
 let pendingDY = 0;
 
-document.addEventListener('mousemove', (e) => {
+document.addEventListener("mousemove", (e) => {
   if (document.pointerLockElement !== renderer.domElement) return;
   pendingDX += e.movementX;
   pendingDY += e.movementY;
 });
 
 // クリックで pointer lock 取得
-renderer.domElement.addEventListener('click', () => {
+renderer.domElement.addEventListener("click", () => {
   if (document.pointerLockElement !== renderer.domElement) {
     renderer.domElement.requestPointerLock();
   }
@@ -229,9 +339,12 @@ function playerOverlapsBlock(bx: number, by: number, bz: number): boolean {
   const hw = PLAYER_HALF_WIDTH;
   const h = PLAYER_HEIGHT;
   return (
-    player.x - hw < bx + 1 && player.x + hw > bx &&
-    player.y < by + 1 && player.y + h > by &&
-    player.z - hw < bz + 1 && player.z + hw > bz
+    player.x - hw < bx + 1 &&
+    player.x + hw > bx &&
+    player.y < by + 1 &&
+    player.y + h > by &&
+    player.z - hw < bz + 1 &&
+    player.z + hw > bz
   );
 }
 
@@ -257,35 +370,37 @@ function modifyBlock(hit: THREE.Intersection, place: boolean) {
 
   const toUpdate = new Set<string>([chunkKey(coords.cx, coords.cz)]);
   if (coords.lx === 0) toUpdate.add(chunkKey(coords.cx - 1, coords.cz));
-  if (coords.lx === CHUNK_SIZE_X - 1) toUpdate.add(chunkKey(coords.cx + 1, coords.cz));
+  if (coords.lx === CHUNK_SIZE_X - 1)
+    toUpdate.add(chunkKey(coords.cx + 1, coords.cz));
   if (coords.lz === 0) toUpdate.add(chunkKey(coords.cx, coords.cz - 1));
-  if (coords.lz === CHUNK_SIZE_Z - 1) toUpdate.add(chunkKey(coords.cx, coords.cz + 1));
+  if (coords.lz === CHUNK_SIZE_Z - 1)
+    toUpdate.add(chunkKey(coords.cx, coords.cz + 1));
   for (const k of toUpdate) {
     if (!chunkBlocks.has(k)) continue;
-    const [ncx, ncz] = k.split(',').map(Number);
+    const [ncx, ncz] = k.split(",").map(Number);
     rebuildChunkMeshes(ncx, ncz);
   }
 }
 
-window.addEventListener('mousedown', (e) => {
+window.addEventListener("mousedown", (e) => {
   if (document.pointerLockElement !== renderer.domElement) return;
   const hit = pickHit();
   if (!hit) return;
   if (e.button === 0) modifyBlock(hit, false);
   if (e.button === 2) modifyBlock(hit, true);
 });
-window.addEventListener('contextmenu', (e) => e.preventDefault());
+window.addEventListener("contextmenu", (e) => e.preventDefault());
 
 // ============================================================
 // HUD
 // ============================================================
 
 const BLOCK_NAMES: Record<BlockId, string> = {
-  [BLOCK.AIR]: 'AIR',
-  [BLOCK.GRASS]: 'GRASS',
-  [BLOCK.STONE]: 'STONE',
-  [BLOCK.SAND]: 'SAND',
-  [BLOCK.WATER]: 'WATER',
+  [BLOCK.AIR]: "AIR",
+  [BLOCK.GRASS]: "GRASS",
+  [BLOCK.STONE]: "STONE",
+  [BLOCK.SAND]: "SAND",
+  [BLOCK.WATER]: "WATER",
 };
 const CODE_TO_BLOCK: Record<string, BlockId> = {
   Digit1: BLOCK.GRASS,
@@ -294,25 +409,25 @@ const CODE_TO_BLOCK: Record<string, BlockId> = {
   Digit4: BLOCK.WATER,
 };
 
-const hud = document.createElement('div');
+const hud = document.createElement("div");
 hud.style.cssText =
-  'position:absolute;top:10px;left:10px;background:rgba(0,0,0,0.55);color:#fff;padding:10px 12px;font-family:sans-serif;font-size:13px;line-height:1.5;pointer-events:none;border-radius:4px;';
+  "position:absolute;top:10px;left:10px;background:rgba(0,0,0,0.55);color:#fff;padding:10px 12px;font-family:sans-serif;font-size:13px;line-height:1.5;pointer-events:none;border-radius:4px;";
 document.body.appendChild(hud);
 
-const lockOverlay = document.createElement('div');
+const lockOverlay = document.createElement("div");
 lockOverlay.style.cssText =
-  'position:absolute;inset:0;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.5);color:#fff;font-family:sans-serif;font-size:22px;pointer-events:none;';
-lockOverlay.textContent = 'Click to play';
+  "position:absolute;inset:0;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.5);color:#fff;font-family:sans-serif;font-size:22px;pointer-events:none;";
+lockOverlay.textContent = "Click to play";
 document.body.appendChild(lockOverlay);
 
-document.addEventListener('pointerlockchange', () => {
+document.addEventListener("pointerlockchange", () => {
   lockOverlay.style.display =
-    document.pointerLockElement === renderer.domElement ? 'none' : 'flex';
+    document.pointerLockElement === renderer.domElement ? "none" : "flex";
 });
 
-const crosshair = document.createElement('div');
+const crosshair = document.createElement("div");
 crosshair.style.cssText =
-  'position:absolute;top:50%;left:50%;width:16px;height:16px;margin:-8px 0 0 -8px;pointer-events:none;';
+  "position:absolute;top:50%;left:50%;width:16px;height:16px;margin:-8px 0 0 -8px;pointer-events:none;";
 crosshair.innerHTML = `
   <div style="position:absolute;top:7px;left:0;right:0;height:2px;background:white;mix-blend-mode:difference;"></div>
   <div style="position:absolute;left:7px;top:0;bottom:0;width:2px;background:white;mix-blend-mode:difference;"></div>
@@ -330,7 +445,7 @@ function updateHud() {
 }
 updateHud();
 
-document.addEventListener('keydown', (e) => {
+document.addEventListener("keydown", (e) => {
   const block = CODE_TO_BLOCK[e.code];
   if (block !== undefined) {
     selectedBlock = block;
@@ -348,6 +463,16 @@ let lastTime = performance.now();
 let accumulator = 0;
 
 function update(dt: number) {
+  // チャンクの動的ロード/アンロード
+  updateWorld();
+
+  // 安全策: プレイヤーのチャンクが未ロードなら即時同期ロード（すり抜け防止）
+  const pcx = Math.floor(player.x / CHUNK_SIZE_X);
+  const pcz = Math.floor(player.z / CHUNK_SIZE_Z);
+  if (!chunkBlocks.has(chunkKey(pcx, pcz))) {
+    loadChunk(pcx, pcz);
+  }
+
   // マウス → ヨー/ピッチ
   yaw -= pendingDX * MOUSE_SENSITIVITY;
   pitch -= pendingDY * MOUSE_SENSITIVITY;
@@ -358,10 +483,10 @@ function update(dt: number) {
   // WASD → 移動方向（ヨー基準）
   let forward = 0;
   let strafe = 0;
-  if (keys.has('KeyW')) forward += 1;
-  if (keys.has('KeyS')) forward -= 1;
-  if (keys.has('KeyA')) strafe -= 1;
-  if (keys.has('KeyD')) strafe += 1;
+  if (keys.has("KeyW")) forward += 1;
+  if (keys.has("KeyS")) forward -= 1;
+  if (keys.has("KeyA")) strafe -= 1;
+  if (keys.has("KeyD")) strafe += 1;
   const len = Math.hypot(forward, strafe);
   if (len > 0) {
     forward /= len;
@@ -379,7 +504,7 @@ function update(dt: number) {
   if (player.vy < TERMINAL_VELOCITY) player.vy = TERMINAL_VELOCITY;
 
   // ジャンプ
-  if (keys.has('Space') && player.onGround) {
+  if (keys.has("Space") && player.onGround) {
     player.vy = JUMP_VELOCITY;
   }
 
@@ -393,7 +518,7 @@ function render() {
   renderer.render(scene, camera);
 }
 
-window.addEventListener('resize', () => {
+window.addEventListener("resize", () => {
   camera.aspect = window.innerWidth / window.innerHeight;
   camera.updateProjectionMatrix();
   renderer.setSize(window.innerWidth, window.innerHeight);
