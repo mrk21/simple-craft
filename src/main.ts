@@ -18,7 +18,15 @@ import {
   idx,
   worldToChunkLocal,
 } from "./world/chunk";
-import { BLOCK, type BlockId, blockKind } from "./world/block";
+import {
+  BLOCK,
+  MAX_FLOWING_LEVEL,
+  type BlockId,
+  blockKind,
+  flowingWaterForLevel,
+  isWaterBlock,
+  waterLevel,
+} from "./world/block";
 import {
   GRAVITY,
   JUMP_VELOCITY,
@@ -414,8 +422,134 @@ const isWater: IsWaterAt = (wx, wy, wz) => {
   if (!c) return false;
   const blocks = chunkBlocks.get(chunkKey(c.cx, c.cz));
   if (!blocks) return false;
-  return blocks[idx(c.lx, c.y, c.lz)] === BLOCK.WATER;
+  return isWaterBlock(blocks[idx(c.lx, c.y, c.lz)] as BlockId);
 };
+
+// ============================================================
+// 水の流体シミュレーション（5Hz ティック、ソース/フロー方式）
+// ============================================================
+
+const WATER_TICK_INTERVAL = 0.2;
+let waterTickAcc = 0;
+const pendingWater = new Set<string>();
+
+function wkey(wx: number, wy: number, wz: number): string {
+  return `${wx},${wy},${wz}`;
+}
+
+function markPendingWater(wx: number, wy: number, wz: number) {
+  pendingWater.add(wkey(wx, wy, wz));
+}
+
+function markPendingWithNeighbors(wx: number, wy: number, wz: number) {
+  markPendingWater(wx, wy, wz);
+  markPendingWater(wx + 1, wy, wz);
+  markPendingWater(wx - 1, wy, wz);
+  markPendingWater(wx, wy + 1, wz);
+  markPendingWater(wx, wy - 1, wz);
+  markPendingWater(wx, wy, wz + 1);
+  markPendingWater(wx, wy, wz - 1);
+}
+
+function getBlockAt(wx: number, wy: number, wz: number): BlockId {
+  if (wy < 0 || wy >= CHUNK_SIZE_Y) return BLOCK.AIR;
+  const c = worldToChunkLocal(wx, wy, wz);
+  if (!c) return BLOCK.AIR;
+  const blocks = chunkBlocks.get(chunkKey(c.cx, c.cz));
+  if (!blocks) return BLOCK.AIR;
+  return blocks[idx(c.lx, c.y, c.lz)] as BlockId;
+}
+
+function setBlockAt(wx: number, wy: number, wz: number, id: BlockId): boolean {
+  if (wy < 0 || wy >= CHUNK_SIZE_Y) return false;
+  const c = worldToChunkLocal(wx, wy, wz);
+  if (!c) return false;
+  const blocks = chunkBlocks.get(chunkKey(c.cx, c.cz));
+  if (!blocks) return false;
+  blocks[idx(c.lx, c.y, c.lz)] = id;
+  return true;
+}
+
+// 周囲セルから新しい状態を計算（純粋関数）
+function computeWaterState(
+  wx: number,
+  wy: number,
+  wz: number,
+  current: BlockId,
+): BlockId {
+  // SOURCE は不滅
+  if (current === BLOCK.WATER) return BLOCK.WATER;
+  // 不透明ブロックは触らない
+  if (blockKind(current) === "opaque") return current;
+
+  // 上に水 → 滝の中（最強の流動水）
+  const above = getBlockAt(wx, wy + 1, wz);
+  if (isWaterBlock(above)) return BLOCK.WATER_F1;
+
+  // 横の最低レベル水を探す
+  // ただし「直下が opaque で支えられている水」だけが水平方向に広がれる。
+  // 直下が空気や水の水（空中の source や滝の途中の F1）は広がる側にならない。
+  let minLevel = MAX_FLOWING_LEVEL + 1;
+  const dirs: [number, number][] = [
+    [1, 0],
+    [-1, 0],
+    [0, 1],
+    [0, -1],
+  ];
+  for (const [dx, dz] of dirs) {
+    const nx = wx + dx;
+    const nz = wz + dz;
+    const n = getBlockAt(nx, wy, nz);
+    if (!isWaterBlock(n)) continue;
+    // 隣接水の直下が床 (opaque) でなければ、その水は広がる元にならない
+    const belowN = getBlockAt(nx, wy - 1, nz);
+    if (blockKind(belowN) !== "opaque") continue;
+    const lvl = waterLevel(n);
+    if (lvl >= 0 && lvl < minLevel) minLevel = lvl;
+  }
+
+  // 隣接水の +1 が MAX を超えたら水にならない（流動だったら干上がる）
+  if (minLevel >= MAX_FLOWING_LEVEL) return BLOCK.AIR;
+  return flowingWaterForLevel(minLevel + 1);
+}
+
+function waterTick() {
+  if (pendingWater.size === 0) return;
+
+  const toProcess = [...pendingWater];
+  pendingWater.clear();
+
+  const changes: [number, number, number, BlockId][] = [];
+  for (const k of toProcess) {
+    const [wx, wy, wz] = k.split(",").map(Number);
+    const current = getBlockAt(wx, wy, wz);
+    const next = computeWaterState(wx, wy, wz, current);
+    if (next !== current) changes.push([wx, wy, wz, next]);
+  }
+
+  const dirtyChunks = new Set<string>();
+  for (const [wx, wy, wz, next] of changes) {
+    if (!setBlockAt(wx, wy, wz, next)) continue;
+    markPendingWithNeighbors(wx, wy, wz);
+    const c = worldToChunkLocal(wx, wy, wz);
+    if (c) {
+      dirtyChunks.add(chunkKey(c.cx, c.cz));
+      if (c.lx === 0) dirtyChunks.add(chunkKey(c.cx - 1, c.cz));
+      if (c.lx === CHUNK_SIZE_X - 1)
+        dirtyChunks.add(chunkKey(c.cx + 1, c.cz));
+      if (c.lz === 0) dirtyChunks.add(chunkKey(c.cx, c.cz - 1));
+      if (c.lz === CHUNK_SIZE_Z - 1)
+        dirtyChunks.add(chunkKey(c.cx, c.cz + 1));
+    }
+  }
+
+  for (const key of dirtyChunks) {
+    if (chunkBlocks.has(key)) {
+      const [cx, cz] = key.split(",").map(Number);
+      rebuildChunkMeshes(cx, cz);
+    }
+  }
+}
 
 // ============================================================
 // 入力
@@ -496,6 +630,9 @@ function modifyBlock(hit: THREE.Intersection, place: boolean) {
     ? selectedBlock
     : BLOCK.AIR;
 
+  // 水流の再評価候補に追加
+  markPendingWithNeighbors(wx, wy, wz);
+
   const toUpdate = new Set<string>([chunkKey(coords.cx, coords.cz)]);
   if (coords.lx === 0) toUpdate.add(chunkKey(coords.cx - 1, coords.cz));
   if (coords.lx === CHUNK_SIZE_X - 1)
@@ -529,6 +666,9 @@ const BLOCK_NAMES: Record<BlockId, string> = {
   [BLOCK.STONE]: "STONE",
   [BLOCK.SAND]: "SAND",
   [BLOCK.WATER]: "WATER",
+  [BLOCK.WATER_F1]: "WATER (flowing 1)",
+  [BLOCK.WATER_F2]: "WATER (flowing 2)",
+  [BLOCK.WATER_F3]: "WATER (flowing 3)",
 };
 const CODE_TO_BLOCK: Record<string, BlockId> = {
   Digit1: BLOCK.GRASS,
@@ -646,6 +786,13 @@ function update(dt: number) {
   }
 
   moveAndCollide(player, isSolid, dt);
+
+  // 水流ティック（5Hz）
+  waterTickAcc += dt;
+  while (waterTickAcc >= WATER_TICK_INTERVAL) {
+    waterTick();
+    waterTickAcc -= WATER_TICK_INTERVAL;
+  }
 }
 
 function render() {

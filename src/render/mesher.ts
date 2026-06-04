@@ -4,7 +4,13 @@ import {
   CHUNK_SIZE_Z,
   idx,
 } from '../world/chunk';
-import { BLOCK, type BlockId, blockColor, blockKind } from '../world/block';
+import {
+  BLOCK,
+  type BlockId,
+  blockColor,
+  blockKind,
+  isWaterBlock,
+} from '../world/block';
 
 export interface ChunkMesh {
   positions: Float32Array;
@@ -215,7 +221,7 @@ export function meshChunkWater(
   for (let y = 0; y < CHUNK_SIZE_Y; y++) {
     for (let z = 0; z < CHUNK_SIZE_Z; z++) {
       for (let x = 0; x < CHUNK_SIZE_X; x++) {
-        if (blocks[idx(x, y, z)] !== BLOCK.WATER) continue;
+        if (!isWaterBlock(blocks[idx(x, y, z)] as BlockId)) continue;
 
         for (const face of FACES) {
           const nx = x + face.dx;
