@@ -6,6 +6,11 @@ import {
   type ChunkMesh,
   type NeighborBlockAt,
 } from "./render/mesher";
+import type {
+  ChunkWorkerRequest,
+  ChunkWorkerResponse,
+  NeighborChunks,
+} from "./workers/chunk.worker";
 import {
   CHUNK_SIZE_X,
   CHUNK_SIZE_Y,
@@ -120,7 +125,13 @@ function makeNeighborLookup(cx: number, cz: number): NeighborBlockAt {
   };
 }
 
-function rebuildChunkMeshes(cx: number, cz: number) {
+// 事前に作られたメッシュデータをシーンへ反映（worker と main thread から共通利用）
+function applyChunkMeshes(
+  cx: number,
+  cz: number,
+  opaqueMesh: ChunkMesh,
+  waterMesh: ChunkMesh,
+) {
   const key = chunkKey(cx, cz);
   const old = chunkMeshes.get(key);
   if (old) {
@@ -133,15 +144,7 @@ function rebuildChunkMeshes(cx: number, cz: number) {
       old.water.geometry.dispose();
     }
   }
-
-  const blocks = chunkBlocks.get(key);
-  if (!blocks) return;
-
-  const neighbor = makeNeighborLookup(cx, cz);
-  const opaqueMesh = meshChunk(blocks, neighbor);
-  const waterMesh = meshChunkWater(blocks, neighbor);
   const next: ChunkMeshes = {};
-
   if (opaqueMesh.indices.length > 0) {
     const m = new THREE.Mesh(buildGeometry(opaqueMesh), opaqueMaterial);
     m.position.set(cx * CHUNK_SIZE_X, 0, cz * CHUNK_SIZE_Z);
@@ -155,6 +158,19 @@ function rebuildChunkMeshes(cx: number, cz: number) {
     next.water = m;
   }
   chunkMeshes.set(key, next);
+}
+
+// メインスレッドで同期 mesh（初期ロード・編集時に使用）
+function rebuildChunkMeshes(cx: number, cz: number) {
+  const blocks = chunkBlocks.get(chunkKey(cx, cz));
+  if (!blocks) return;
+  const neighbor = makeNeighborLookup(cx, cz);
+  applyChunkMeshes(
+    cx,
+    cz,
+    meshChunk(blocks, neighbor),
+    meshChunkWater(blocks, neighbor),
+  );
 }
 
 // チャンクのロード: ブロック生成 + メッシュ構築 + 隣接メッシュ再構築
@@ -210,6 +226,102 @@ function unloadChunk(cx: number, cz: number) {
   }
 }
 
+// ============================================================
+// Worker: チャンク生成 + meshing を逃がす
+// ============================================================
+
+const chunkWorker = new Worker(
+  new URL('./workers/chunk.worker.ts', import.meta.url),
+  { type: 'module' },
+);
+
+type RequestKind = 'load' | 'remesh';
+interface PendingRequest {
+  cx: number;
+  cz: number;
+  kind: RequestKind;
+}
+const pendingRequests = new Map<number, PendingRequest>();
+let nextRequestId = 0;
+const MAX_IN_FLIGHT = 8;
+
+function isInFlight(cx: number, cz: number): boolean {
+  for (const r of pendingRequests.values()) {
+    if (r.cx === cx && r.cz === cz) return true;
+  }
+  return false;
+}
+
+function collectNeighborClones(cx: number, cz: number): NeighborChunks {
+  const result: NeighborChunks = {};
+  const nx = chunkBlocks.get(chunkKey(cx - 1, cz));
+  if (nx) result.nx = nx.slice();
+  const px = chunkBlocks.get(chunkKey(cx + 1, cz));
+  if (px) result.px = px.slice();
+  const nz = chunkBlocks.get(chunkKey(cx, cz - 1));
+  if (nz) result.nz = nz.slice();
+  const pz = chunkBlocks.get(chunkKey(cx, cz + 1));
+  if (pz) result.pz = pz.slice();
+  return result;
+}
+
+function enqueueWorker(cx: number, cz: number, kind: RequestKind) {
+  if (kind === 'load' && chunkBlocks.has(chunkKey(cx, cz))) return;
+  if (kind === 'remesh' && !chunkBlocks.has(chunkKey(cx, cz))) return;
+  if (isInFlight(cx, cz)) return;
+
+  const id = nextRequestId++;
+  pendingRequests.set(id, { cx, cz, kind });
+
+  const neighbors = collectNeighborClones(cx, cz);
+  const transfers: Transferable[] = [];
+  if (neighbors.nx) transfers.push(neighbors.nx.buffer);
+  if (neighbors.px) transfers.push(neighbors.px.buffer);
+  if (neighbors.nz) transfers.push(neighbors.nz.buffer);
+  if (neighbors.pz) transfers.push(neighbors.pz.buffer);
+
+  const req: ChunkWorkerRequest = {
+    id,
+    chunkX: cx,
+    chunkZ: cz,
+    seed: SEED,
+    neighbors,
+  };
+  if (kind === 'remesh') {
+    const clone = chunkBlocks.get(chunkKey(cx, cz))!.slice();
+    req.blocks = clone;
+    transfers.push(clone.buffer);
+  }
+  chunkWorker.postMessage(req, transfers);
+}
+
+chunkWorker.onmessage = (e: MessageEvent<ChunkWorkerResponse>) => {
+  const { id, blocks, opaque, water } = e.data;
+  const ctx = pendingRequests.get(id);
+  if (!ctx) return;
+  pendingRequests.delete(id);
+
+  if (ctx.kind === 'load') {
+    chunkBlocks.set(chunkKey(ctx.cx, ctx.cz), blocks);
+  }
+  applyChunkMeshes(ctx.cx, ctx.cz, opaque, water);
+
+  if (ctx.kind === 'load') {
+    // ロード後、隣接チャンクの境界 culling を更新（async で）
+    const neighbors = [
+      [ctx.cx + 1, ctx.cz],
+      [ctx.cx - 1, ctx.cz],
+      [ctx.cx, ctx.cz + 1],
+      [ctx.cx, ctx.cz - 1],
+    ] as const;
+    for (const [ncx, ncz] of neighbors) {
+      if (chunkBlocks.has(chunkKey(ncx, ncz))) {
+        enqueueWorker(ncx, ncz, 'remesh');
+      }
+    }
+  }
+};
+
 // 起動時: スポーン周辺だけ同期ロード（重力着地用の地面確保）
 for (let cz = -INITIAL_RADIUS; cz <= INITIAL_RADIUS; cz++) {
   for (let cx = -INITIAL_RADIUS; cx <= INITIAL_RADIUS; cx++) {
@@ -244,7 +356,8 @@ function updateWorld() {
     for (const [cx, cz] of toUnload) unloadChunk(cx, cz);
   }
 
-  // ロード対象を1つだけ（最も近い未ロード）処理
+  // Worker で並行ロード（上限まで詰める。最も近い未ロード優先）
+  if (pendingRequests.size >= MAX_IN_FLIGHT) return;
   let bestCx = 0;
   let bestCz = 0;
   let bestDist = Infinity;
@@ -254,6 +367,7 @@ function updateWorld() {
       const cx = pcx + dx;
       const cz = pcz + dz;
       if (chunkBlocks.has(chunkKey(cx, cz))) continue;
+      if (isInFlight(cx, cz)) continue;
       const dist = dx * dx + dz * dz;
       if (dist < bestDist) {
         bestDist = dist;
@@ -263,7 +377,7 @@ function updateWorld() {
       }
     }
   }
-  if (found) loadChunk(bestCx, bestCz);
+  if (found) enqueueWorker(bestCx, bestCz, 'load');
 }
 
 // ============================================================
