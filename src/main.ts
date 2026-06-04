@@ -425,6 +425,55 @@ const isSolid: IsSolidAt = (wx, wy, wz) => {
   return blockKind(blocks[idx(c.lx, c.y, c.lz)] as BlockId) === "opaque";
 };
 
+// プレイヤーエンティティ（MC Steve 風の 6 ボックス）
+// 高さ 1.8 を [脚 0~0.65][胴 0.65~1.3][頭 1.3~1.8] に配分
+function makeBodyPart(
+  w: number,
+  h: number,
+  d: number,
+  color: number,
+  x: number,
+  yCenter: number,
+  z: number,
+): THREE.Mesh {
+  const geo = new THREE.BoxGeometry(w, h, d);
+  const mat = new THREE.MeshLambertMaterial({ color });
+  const mesh = new THREE.Mesh(geo, mat);
+  mesh.position.set(x, yCenter, z);
+  return mesh;
+}
+
+const SKIN_COLOR = 0xeebd9e;
+const SHIRT_COLOR = 0x3b7eb3;
+const PANTS_COLOR = 0x2a4670;
+
+const playerGroup = new THREE.Group();
+// 頭 0.5×0.5×0.5、中心 y=1.55
+playerGroup.add(makeBodyPart(0.5, 0.5, 0.5, SKIN_COLOR, 0, 1.55, 0));
+// 胴 0.5×0.65×0.25、中心 y=0.975
+playerGroup.add(makeBodyPart(0.5, 0.65, 0.25, SHIRT_COLOR, 0, 0.975, 0));
+// 左腕 0.2×0.65×0.25、x=-0.35
+playerGroup.add(makeBodyPart(0.2, 0.65, 0.25, SKIN_COLOR, -0.35, 0.975, 0));
+// 右腕 0.2×0.65×0.25、x=+0.35
+playerGroup.add(makeBodyPart(0.2, 0.65, 0.25, SKIN_COLOR, 0.35, 0.975, 0));
+// 左脚 0.2×0.65×0.25、x=-0.1
+playerGroup.add(makeBodyPart(0.2, 0.65, 0.25, PANTS_COLOR, -0.1, 0.325, 0));
+// 右脚 0.2×0.65×0.25、x=+0.1
+playerGroup.add(makeBodyPart(0.2, 0.65, 0.25, PANTS_COLOR, 0.1, 0.325, 0));
+scene.add(playerGroup);
+playerGroup.visible = false; // 一人称ではデフォルト非表示
+
+// 視点モード
+type ViewMode = "first" | "third-back" | "third-front";
+let viewMode: ViewMode = "first";
+const VIEW_DISTANCE = 4; // 三人称時のカメラ距離
+
+function nextViewMode(m: ViewMode): ViewMode {
+  if (m === "first") return "third-back";
+  if (m === "third-back") return "third-front";
+  return "first";
+}
+
 const isWater: IsWaterAt = (wx, wy, wz) => {
   if (wy < 0 || wy >= CHUNK_SIZE_Y) return false;
   const c = worldToChunkLocal(wx, wy, wz);
@@ -712,8 +761,15 @@ crosshair.innerHTML = `
 document.body.appendChild(crosshair);
 
 function updateHud() {
+  const viewLabel =
+    viewMode === "first"
+      ? "first-person"
+      : viewMode === "third-back"
+        ? "third-person (back)"
+        : "third-person (front)";
   hud.innerHTML = `
     Selected: <b>${BLOCK_NAMES[selectedBlock]}</b><br>
+    View: <b>${viewLabel}</b> (F5)<br>
     WASD = move, Space = jump<br>
     Left click = break / Right click = place<br>
     1: GRASS &nbsp; 2: STONE &nbsp; 3: SAND &nbsp; 4: WATER<br>
@@ -726,6 +782,12 @@ document.addEventListener("keydown", (e) => {
   const block = CODE_TO_BLOCK[e.code];
   if (block !== undefined) {
     selectedBlock = block;
+    updateHud();
+  }
+  if (e.code === "F5") {
+    e.preventDefault();
+    viewMode = nextViewMode(viewMode);
+    playerGroup.visible = viewMode !== "first";
     updateHud();
   }
 });
@@ -805,9 +867,38 @@ function update(dt: number) {
 }
 
 function render() {
-  camera.rotation.y = yaw;
-  camera.rotation.x = pitch;
-  camera.position.set(player.x, player.y + PLAYER_EYE_OFFSET, player.z);
+  const eyeY = player.y + PLAYER_EYE_OFFSET;
+  // 視線方向（forward ベクトル）
+  const fx = -Math.sin(yaw) * Math.cos(pitch);
+  const fy = Math.sin(pitch);
+  const fz = -Math.cos(yaw) * Math.cos(pitch);
+
+  if (viewMode === "first") {
+    camera.position.set(player.x, eyeY, player.z);
+    camera.rotation.y = yaw;
+    camera.rotation.x = pitch;
+  } else if (viewMode === "third-back") {
+    camera.position.set(
+      player.x - fx * VIEW_DISTANCE,
+      eyeY - fy * VIEW_DISTANCE,
+      player.z - fz * VIEW_DISTANCE,
+    );
+    camera.rotation.y = yaw;
+    camera.rotation.x = pitch;
+  } else {
+    // 三人称前面: カメラはプレイヤーの前 + 視線を180度反転
+    camera.position.set(
+      player.x + fx * VIEW_DISTANCE,
+      eyeY + fy * VIEW_DISTANCE,
+      player.z + fz * VIEW_DISTANCE,
+    );
+    camera.rotation.y = yaw + Math.PI;
+    camera.rotation.x = -pitch;
+  }
+
+  // プレイヤーモデルの位置・向き（yaw に合わせて体が回る）
+  playerGroup.position.set(player.x, player.y, player.z);
+  playerGroup.rotation.y = yaw;
 
   // 視点（目の位置）が水中なら濃い藍色のフォグ + 背景に切替
   const eyeInWater = isWater(
