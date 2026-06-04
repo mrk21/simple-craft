@@ -22,6 +22,7 @@ import {
   BLOCK,
   MAX_FLOWING_LEVEL,
   type BlockId,
+  blockColor,
   blockKind,
   flowingWaterForLevel,
   isWaterBlock,
@@ -773,6 +774,24 @@ window.addEventListener("mousedown", (e) => {
   if (e.button === 0) modifyBlock(hit, false);
   if (e.button === 2) modifyBlock(hit, true);
 });
+
+// ホイールでホットバーのスロット移動（MC 同様）
+window.addEventListener(
+  "wheel",
+  (e) => {
+    if (document.pointerLockElement !== renderer.domElement) return;
+    if (e.deltaY === 0) return;
+    e.preventDefault();
+    const current = hotbarConfig.findIndex((c) => c.block === selectedBlock);
+    const n = hotbarConfig.length;
+    // 下スクロール (deltaY > 0) で次のスロット、上スクロールで前のスロット
+    const next =
+      e.deltaY > 0 ? (current + 1) % n : (current - 1 + n) % n;
+    selectedBlock = hotbarConfig[next].block;
+    updateHotbarSelection();
+  },
+  { passive: false },
+);
 window.addEventListener("contextmenu", (e) => e.preventDefault());
 
 // ============================================================
@@ -821,6 +840,40 @@ crosshair.innerHTML = `
 `;
 document.body.appendChild(crosshair);
 
+// ホットバー（画面下中央）
+const hotbarConfig: { key: string; block: BlockId }[] = [
+  { key: "1", block: BLOCK.GRASS },
+  { key: "2", block: BLOCK.STONE },
+  { key: "3", block: BLOCK.SAND },
+  { key: "4", block: BLOCK.WATER },
+];
+
+const hotbar = document.createElement("div");
+hotbar.style.cssText =
+  "position:absolute;bottom:20px;left:50%;transform:translateX(-50%);display:flex;gap:6px;pointer-events:none;";
+document.body.appendChild(hotbar);
+
+const hotbarSlots = hotbarConfig.map(({ key, block }) => {
+  const [r, g, b] = blockColor(block);
+  const slot = document.createElement("div");
+  slot.style.cssText = `width:60px;height:60px;background:rgb(${r},${g},${b});display:flex;flex-direction:column;justify-content:space-between;padding:4px;box-sizing:border-box;color:white;font-family:sans-serif;font-size:11px;text-shadow:1px 1px 0 black;border-radius:4px;border:3px solid rgba(0,0,0,0.6);`;
+  slot.innerHTML = `<div style="font-weight:bold;">${key}</div><div style="text-align:center;font-size:10px;">${BLOCK_NAMES[block]}</div>`;
+  hotbar.appendChild(slot);
+  return slot;
+});
+
+function updateHotbarSelection() {
+  for (let i = 0; i < hotbarConfig.length; i++) {
+    hotbarSlots[i].style.border =
+      hotbarConfig[i].block === selectedBlock
+        ? "3px solid white"
+        : "3px solid rgba(0,0,0,0.6)";
+    hotbarSlots[i].style.transform =
+      hotbarConfig[i].block === selectedBlock ? "translateY(-4px)" : "none";
+  }
+}
+updateHotbarSelection();
+
 function updateHud() {
   const viewLabel =
     viewMode === "first"
@@ -829,12 +882,10 @@ function updateHud() {
         ? "third-person (back)"
         : "third-person (front)";
   hud.innerHTML = `
-    Selected: <b>${BLOCK_NAMES[selectedBlock]}</b><br>
     View: <b>${viewLabel}</b> (F5)<br>
     WASD = move, Space = jump<br>
     Left click = break / Right click = place<br>
-    1: GRASS &nbsp; 2: STONE &nbsp; 3: SAND &nbsp; 4: WATER<br>
-    ESC = release cursor
+    1-4 = select block / ESC = release cursor
   `.trim();
 }
 updateHud();
@@ -843,7 +894,7 @@ document.addEventListener("keydown", (e) => {
   const block = CODE_TO_BLOCK[e.code];
   if (block !== undefined) {
     selectedBlock = block;
-    updateHud();
+    updateHotbarSelection();
   }
   if (e.code === "F5") {
     e.preventDefault();
