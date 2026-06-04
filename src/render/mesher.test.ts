@@ -1,7 +1,8 @@
 import { test, expect } from 'vitest';
 import { meshChunk, meshChunkWater } from './mesher';
 import { CHUNK_SIZE_X, CHUNK_VOLUME, idx } from '../world/chunk';
-import { BLOCK, blockColor } from '../world/block';
+import { BLOCK } from '../world/block';
+import { TEX, uvBoxForSlot } from './atlas';
 
 test('全 AIR のチャンクは空メッシュ', () => {
   const blocks = new Uint8Array(CHUNK_VOLUME);
@@ -9,6 +10,7 @@ test('全 AIR のチャンクは空メッシュ', () => {
   expect(mesh.positions.length).toBe(0);
   expect(mesh.normals.length).toBe(0);
   expect(mesh.colors.length).toBe(0);
+  expect(mesh.uvs.length).toBe(0);
   expect(mesh.indices.length).toBe(0);
 });
 
@@ -20,29 +22,30 @@ test('中央に STONE 1個 → 6面（24頂点・36インデックス）', () =>
   expect(mesh.positions.length).toBe(24 * 3); // 6面 × 4頂点 × 3座標
   expect(mesh.normals.length).toBe(24 * 3);
   expect(mesh.colors.length).toBe(24 * 3); // 6面 × 4頂点 × RGB3
+  expect(mesh.uvs.length).toBe(24 * 2); // 6面 × 4頂点 × UV2
 });
 
-test('STONE ブロックの全頂点色は STONE 色', () => {
+test('AO 占有なしのブロックの頂点カラーは全て白(255)のグレースケール', () => {
+  // 単独ブロックは AO 占有なし → 明度 1.0 → 全成分 255
   const blocks = new Uint8Array(CHUNK_VOLUME);
   blocks[idx(8, 64, 8)] = BLOCK.STONE;
   const mesh = meshChunk(blocks);
-  const [sr, sg, sb] = blockColor(BLOCK.STONE);
   for (let v = 0; v < mesh.colors.length / 3; v++) {
-    expect(mesh.colors[v * 3]).toBe(sr);
-    expect(mesh.colors[v * 3 + 1]).toBe(sg);
-    expect(mesh.colors[v * 3 + 2]).toBe(sb);
+    expect(mesh.colors[v * 3]).toBe(255);
+    expect(mesh.colors[v * 3 + 1]).toBe(255);
+    expect(mesh.colors[v * 3 + 2]).toBe(255);
   }
 });
 
-test('GRASS ブロックの全頂点色は GRASS 色', () => {
+test('頂点カラーはグレースケール（R=G=B、AO のみを表す）', () => {
+  // AO 影響を入れるため隣接ブロックを置く
   const blocks = new Uint8Array(CHUNK_VOLUME);
   blocks[idx(8, 64, 8)] = BLOCK.GRASS;
+  blocks[idx(9, 64, 9)] = BLOCK.STONE;
   const mesh = meshChunk(blocks);
-  const [gr, gg, gb] = blockColor(BLOCK.GRASS);
   for (let v = 0; v < mesh.colors.length / 3; v++) {
-    expect(mesh.colors[v * 3]).toBe(gr);
-    expect(mesh.colors[v * 3 + 1]).toBe(gg);
-    expect(mesh.colors[v * 3 + 2]).toBe(gb);
+    expect(mesh.colors[v * 3]).toBe(mesh.colors[v * 3 + 1]);
+    expect(mesh.colors[v * 3 + 1]).toBe(mesh.colors[v * 3 + 2]);
   }
 });
 
@@ -86,7 +89,7 @@ test('全ての面の頂点順序（CCW winding）が法線と一致する', () 
 });
 
 test('隣接 opaque ブロックによる AO で一部頂点が暗くなる', () => {
-  // 単独 STONE: AO 占有なし → 全頂点フル明度（=元の色）
+  // 単独 STONE: AO 占有なし → 全頂点フル明度
   const noOccluder = new Uint8Array(CHUNK_VOLUME);
   noOccluder[idx(8, 64, 8)] = BLOCK.STONE;
   const meshNo = meshChunk(noOccluder);
@@ -113,6 +116,7 @@ test('meshChunkWater: opaque のみ → 空メッシュ', () => {
   blocks[idx(8, 64, 8)] = BLOCK.STONE;
   const water = meshChunkWater(blocks);
   expect(water.indices.length).toBe(0);
+  expect(water.uvs.length).toBe(0);
 });
 
 test('meshChunkWater: 単独 WATER → 6面', () => {
@@ -120,6 +124,7 @@ test('meshChunkWater: 単独 WATER → 6面', () => {
   blocks[idx(8, 64, 8)] = BLOCK.WATER;
   const water = meshChunkWater(blocks);
   expect(water.indices.length).toBe(36);
+  expect(water.uvs.length).toBe(24 * 2);
 });
 
 test('meshChunkWater: WATER の隣が STONE → 接面は描かない（5面）', () => {
@@ -161,15 +166,14 @@ test('meshChunkWater: 隣接チャンクの WATER で水-水接面はカリン�
   expect(mesh.indices.length).toBe(5 * 6);
 });
 
-test('meshChunkWater: 全頂点色は WATER 色', () => {
+test('meshChunkWater: 全頂点カラーは白（テクスチャをそのまま透過）', () => {
   const blocks = new Uint8Array(CHUNK_VOLUME);
   blocks[idx(8, 64, 8)] = BLOCK.WATER;
   const water = meshChunkWater(blocks);
-  const [wr, wg, wb] = blockColor(BLOCK.WATER);
   for (let v = 0; v < water.colors.length / 3; v++) {
-    expect(water.colors[v * 3]).toBe(wr);
-    expect(water.colors[v * 3 + 1]).toBe(wg);
-    expect(water.colors[v * 3 + 2]).toBe(wb);
+    expect(water.colors[v * 3]).toBe(255);
+    expect(water.colors[v * 3 + 1]).toBe(255);
+    expect(water.colors[v * 3 + 2]).toBe(255);
   }
 });
 
@@ -188,4 +192,81 @@ test('STONE の隣が WATER → STONE 側の面は描かれる（透明扱い）
   expect(meshA.indices.length).toBe(36);
   // STONE 隣接: 接面が両側でカリングされ 10面
   expect(meshB.indices.length).toBe(60);
+});
+
+test('STONE の全頂点 UV は STONE スロットの矩形内に収まる', () => {
+  const blocks = new Uint8Array(CHUNK_VOLUME);
+  blocks[idx(8, 64, 8)] = BLOCK.STONE;
+  const mesh = meshChunk(blocks);
+  const box = uvBoxForSlot(TEX.STONE);
+  for (let v = 0; v < mesh.uvs.length / 2; v++) {
+    const u = mesh.uvs[v * 2];
+    const vy = mesh.uvs[v * 2 + 1];
+    expect(u).toBeGreaterThanOrEqual(box.u0 - 1e-6);
+    expect(u).toBeLessThanOrEqual(box.u1 + 1e-6);
+    expect(vy).toBeGreaterThanOrEqual(box.v0 - 1e-6);
+    expect(vy).toBeLessThanOrEqual(box.v1 + 1e-6);
+  }
+});
+
+test('GRASS: 上面=GRASS_TOP, 下面=DIRT, 側面=GRASS_SIDE スロットの UV を持つ', () => {
+  const blocks = new Uint8Array(CHUNK_VOLUME);
+  blocks[idx(8, 64, 8)] = BLOCK.GRASS;
+  const mesh = meshChunk(blocks);
+
+  // 面の順序は mesher の FACES と一致: 0=+X, 1=-X, 2=+Y, 3=-Y, 4=+Z, 5=-Z
+  const topBox = uvBoxForSlot(TEX.GRASS_TOP);
+  const dirtBox = uvBoxForSlot(TEX.DIRT);
+  const sideBox = uvBoxForSlot(TEX.GRASS_SIDE);
+
+  const faceCount = mesh.indices.length / 6;
+  expect(faceCount).toBe(6);
+
+  function uvAt(faceIdx: number, cornerIdx: number): [number, number] {
+    const i = (faceIdx * 4 + cornerIdx) * 2;
+    return [mesh.uvs[i], mesh.uvs[i + 1]];
+  }
+
+  function inBox(uv: [number, number], box: { u0: number; v0: number; u1: number; v1: number }) {
+    return (
+      uv[0] >= box.u0 - 1e-6 && uv[0] <= box.u1 + 1e-6 &&
+      uv[1] >= box.v0 - 1e-6 && uv[1] <= box.v1 + 1e-6
+    );
+  }
+
+  for (let c = 0; c < 4; c++) {
+    expect(inBox(uvAt(2, c), topBox), `top face corner ${c}`).toBe(true);
+    expect(inBox(uvAt(3, c), dirtBox), `bottom face corner ${c}`).toBe(true);
+  }
+  for (const f of [0, 1, 4, 5]) {
+    for (let c = 0; c < 4; c++) {
+      expect(inBox(uvAt(f, c), sideBox), `side face ${f} corner ${c}`).toBe(true);
+    }
+  }
+});
+
+test('側面の UV: y=低 の頂点は v=下端、y=高 の頂点は v=上端', () => {
+  // GRASS_SIDE のテクスチャは「上に草・下に土」で上下方向に意味がある
+  const blocks = new Uint8Array(CHUNK_VOLUME);
+  blocks[idx(8, 64, 8)] = BLOCK.GRASS;
+  const mesh = meshChunk(blocks);
+  const sideBox = uvBoxForSlot(TEX.GRASS_SIDE);
+
+  // 各側面（face 0,1,4,5）について頂点の y 座標と v を対応付ける
+  const sideFaces = [0, 1, 4, 5];
+  for (const f of sideFaces) {
+    for (let c = 0; c < 4; c++) {
+      const posIdx = (f * 4 + c) * 3;
+      const py = mesh.positions[posIdx + 1];
+      const uvIdx = (f * 4 + c) * 2;
+      const v = mesh.uvs[uvIdx + 1];
+
+      // ブロック中心 (8,64,8) → y=64 が下端、y=65 が上端
+      if (py === 64) {
+        expect(v, `face ${f} corner ${c} bottom should have v=v1`).toBeCloseTo(sideBox.v1);
+      } else if (py === 65) {
+        expect(v, `face ${f} corner ${c} top should have v=v0`).toBeCloseTo(sideBox.v0);
+      }
+    }
+  }
 });

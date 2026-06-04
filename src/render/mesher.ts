@@ -7,15 +7,21 @@ import {
 import {
   BLOCK,
   type BlockId,
-  blockColor,
   blockKind,
   isWaterBlock,
 } from '../world/block';
+import {
+  FACE_UV_CORNERS,
+  textureSlotFor,
+  uvBoxForSlot,
+} from './atlas';
 
 export interface ChunkMesh {
   positions: Float32Array;
   normals: Float32Array;
+  // 頂点カラーは AO 由来のグレースケール明度のみ（最終色はテクスチャ × 明度）
   colors: Uint8Array;
+  uvs: Float32Array;
   indices: Uint32Array;
 }
 
@@ -40,6 +46,7 @@ interface Face {
 }
 
 // 6面定義。corners は外から見て CCW、各 corner に AO 用の3隣接 offset 付き
+// 配列の順序は atlas.ts の FACE_UV_CORNERS と一致させる
 const FACES: readonly Face[] = [
   // +X (right)
   {
@@ -103,7 +110,7 @@ const FACES: readonly Face[] = [
   },
 ];
 
-// AO レベル 0-3 → 明度
+// AO レベル 0-3 → 明度（最大 1.0 で 255 にマップ）
 const AO_BRIGHTNESS = [0.5, 0.65, 0.8, 1.0];
 
 function inChunk(x: number, y: number, z: number): boolean {
@@ -167,6 +174,7 @@ export function meshChunk(
   const positions: number[] = [];
   const normals: number[] = [];
   const colors: number[] = [];
+  const uvs: number[] = [];
   const indices: number[] = [];
 
   for (let y = 0; y < CHUNK_SIZE_Y; y++) {
@@ -174,25 +182,30 @@ export function meshChunk(
       for (let x = 0; x < CHUNK_SIZE_X; x++) {
         const id = blocks[idx(x, y, z)] as BlockId;
         if (blockKind(id) !== 'opaque') continue;
-        const [cr, cg, cb] = blockColor(id);
 
-        for (const face of FACES) {
+        for (let fi = 0; fi < FACES.length; fi++) {
+          const face = FACES[fi];
           const nx = x + face.dx;
           const ny = y + face.dy;
           const nz = z + face.dz;
           if (isOpaqueAt(blocks, neighborBlockAt, nx, ny, nz)) continue;
 
+          const slot = textureSlotFor(id, fi);
+          const box = uvBoxForSlot(slot);
+          const uvCorners = FACE_UV_CORNERS[fi];
           const base = positions.length / 3;
-          for (const corner of face.corners) {
+          for (let ci = 0; ci < 4; ci++) {
+            const corner = face.corners[ci];
             const ao = computeAo(blocks, neighborBlockAt, nx, ny, nz, corner.ao);
             const b = AO_BRIGHTNESS[ao];
+            const gray = Math.floor(b * 255);
             positions.push(x + corner.pos[0], y + corner.pos[1], z + corner.pos[2]);
             normals.push(face.normal[0], face.normal[1], face.normal[2]);
-            colors.push(
-              Math.floor(cr * b),
-              Math.floor(cg * b),
-              Math.floor(cb * b),
-            );
+            colors.push(gray, gray, gray);
+            const [cu, cv] = uvCorners[ci];
+            const u = box.u0 + cu * (box.u1 - box.u0);
+            const v = box.v0 + cv * (box.v1 - box.v0);
+            uvs.push(u, v);
           }
           indices.push(base, base + 1, base + 2, base, base + 2, base + 3);
         }
@@ -204,6 +217,7 @@ export function meshChunk(
     positions: new Float32Array(positions),
     normals: new Float32Array(normals),
     colors: new Uint8Array(colors),
+    uvs: new Float32Array(uvs),
     indices: new Uint32Array(indices),
   };
 }
@@ -215,30 +229,41 @@ export function meshChunkWater(
   const positions: number[] = [];
   const normals: number[] = [];
   const colors: number[] = [];
+  const uvs: number[] = [];
   const indices: number[] = [];
-  const [cr, cg, cb] = blockColor(BLOCK.WATER);
 
   for (let y = 0; y < CHUNK_SIZE_Y; y++) {
     for (let z = 0; z < CHUNK_SIZE_Z; z++) {
       for (let x = 0; x < CHUNK_SIZE_X; x++) {
-        if (!isWaterBlock(blocks[idx(x, y, z)] as BlockId)) continue;
+        const id = blocks[idx(x, y, z)] as BlockId;
+        if (!isWaterBlock(id)) continue;
 
-        for (const face of FACES) {
+        for (let fi = 0; fi < FACES.length; fi++) {
+          const face = FACES[fi];
           const nx = x + face.dx;
           const ny = y + face.dy;
           const nz = z + face.dz;
           // 水面: 隣が AIR のときだけ描く（水-水、水-opaque は描かない）
           if (!isAirAt(blocks, neighborBlockAt, nx, ny, nz)) continue;
 
+          const slot = textureSlotFor(id, fi);
+          const box = uvBoxForSlot(slot);
+          const uvCorners = FACE_UV_CORNERS[fi];
           const base = positions.length / 3;
-          for (const corner of face.corners) {
+          for (let ci = 0; ci < 4; ci++) {
+            const corner = face.corners[ci];
             positions.push(
               x + corner.pos[0],
               y + corner.pos[1],
               z + corner.pos[2],
             );
             normals.push(face.normal[0], face.normal[1], face.normal[2]);
-            colors.push(cr, cg, cb); // AO なし（透明面ではノイズになる）
+            // 水は AO なし、テクスチャ色をそのまま透過させるため白
+            colors.push(255, 255, 255);
+            const [cu, cv] = uvCorners[ci];
+            const u = box.u0 + cu * (box.u1 - box.u0);
+            const v = box.v0 + cv * (box.v1 - box.v0);
+            uvs.push(u, v);
           }
           indices.push(base, base + 1, base + 2, base, base + 2, base + 3);
         }
@@ -250,6 +275,7 @@ export function meshChunkWater(
     positions: new Float32Array(positions),
     normals: new Float32Array(normals),
     colors: new Uint8Array(colors),
+    uvs: new Float32Array(uvs),
     indices: new Uint32Array(indices),
   };
 }

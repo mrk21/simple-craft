@@ -6,6 +6,7 @@ import {
   type ChunkMesh,
   type NeighborBlockAt,
 } from "./render/mesher";
+import { buildAtlasTexture } from "./render/atlas";
 import type {
   ChunkWorkerRequest,
   ChunkWorkerResponse,
@@ -127,9 +128,14 @@ renderer.setPixelRatio(window.devicePixelRatio);
 renderer.setSize(window.innerWidth, window.innerHeight);
 document.body.appendChild(renderer.domElement);
 
-const opaqueMaterial = new THREE.MeshLambertMaterial({ vertexColors: true });
+const atlasTexture = buildAtlasTexture();
+const opaqueMaterial = new THREE.MeshLambertMaterial({
+  vertexColors: true,
+  map: atlasTexture,
+});
 const waterMaterial = new THREE.MeshLambertMaterial({
   vertexColors: true,
+  map: atlasTexture,
   transparent: true,
   opacity: 0.6,
   depthWrite: false,
@@ -164,6 +170,7 @@ function buildGeometry(mesh: ChunkMesh): THREE.BufferGeometry {
   g.setAttribute("position", new THREE.BufferAttribute(mesh.positions, 3));
   g.setAttribute("normal", new THREE.BufferAttribute(mesh.normals, 3));
   g.setAttribute("color", new THREE.BufferAttribute(mesh.colors, 3, true));
+  g.setAttribute("uv", new THREE.BufferAttribute(mesh.uvs, 2));
   g.setIndex(new THREE.BufferAttribute(mesh.indices, 1));
   return g;
 }

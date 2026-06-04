@@ -76,10 +76,12 @@ self.onmessage = (e: MessageEvent<ChunkWorkerRequest>) => {
     opaque.positions.buffer,
     opaque.normals.buffer,
     opaque.colors.buffer,
+    opaque.uvs.buffer,
     opaque.indices.buffer,
     water.positions.buffer,
     water.normals.buffer,
     water.colors.buffer,
+    water.uvs.buffer,
     water.indices.buffer,
   ];
   self.postMessage(response, transfers);
