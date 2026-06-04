@@ -108,13 +108,18 @@ const chunkMeshes = new Map<string, ChunkMeshes>();
 const HOTBAR_SLOTS = 9;
 const INVENTORY_SLOTS = 27;
 const TOTAL_SLOTS = HOTBAR_SLOTS + INVENTORY_SLOTS;
-const inventory: (BlockId | null)[] = new Array(TOTAL_SLOTS).fill(null);
-inventory[0] = BLOCK.GRASS;
-inventory[1] = BLOCK.STONE;
-inventory[2] = BLOCK.SAND;
-inventory[3] = BLOCK.WATER;
+const MAX_STACK = 64;
+interface ItemStack {
+  block: BlockId;
+  count: number;
+}
+const inventory: (ItemStack | null)[] = new Array(TOTAL_SLOTS).fill(null);
+inventory[0] = { block: BLOCK.GRASS, count: MAX_STACK };
+inventory[1] = { block: BLOCK.STONE, count: MAX_STACK };
+inventory[2] = { block: BLOCK.SAND, count: MAX_STACK };
+inventory[3] = { block: BLOCK.WATER, count: MAX_STACK };
 let selectedHotbarIndex = 0;
-let heldItem: BlockId | null = null;
+let heldItem: ItemStack | null = null;
 let inventoryOpen = false;
 
 function chunkKey(cx: number, cz: number): string {
@@ -738,6 +743,138 @@ function playerOverlapsBlock(bx: number, by: number, bz: number): boolean {
   );
 }
 
+// ============================================================
+// ドロップアイテム（ブロックを壊した時に出る小さな立方体）
+// ============================================================
+
+interface DroppedItem {
+  block: BlockId;
+  mesh: THREE.Mesh;
+  x: number;
+  y: number;
+  z: number;
+  vx: number;
+  vy: number;
+  vz: number;
+  age: number;
+}
+
+const ITEM_SIZE = 0.25;
+const ITEM_GRAVITY = -16;
+const ITEM_TERMINAL_VELOCITY = -20;
+const ITEM_POP_VY = 3;
+const ITEM_POP_HORIZ = 1.5;
+const ITEM_HORIZONTAL_FRICTION = 0.85; // 1秒で 0.85^60 ≈ 微小、速やかに止まる
+const ITEM_PICKUP_RADIUS = 1.5;
+const ITEM_LIFETIME = 300; // 5分で自動消滅
+
+const droppedItems: DroppedItem[] = [];
+
+function spawnDroppedItem(
+  block: BlockId,
+  x: number,
+  y: number,
+  z: number,
+) {
+  const [r, g, b] = blockColor(block);
+  const color = (r << 16) | (g << 8) | b;
+  const geo = new THREE.BoxGeometry(ITEM_SIZE, ITEM_SIZE, ITEM_SIZE);
+  const mat = new THREE.MeshLambertMaterial({ color });
+  const mesh = new THREE.Mesh(geo, mat);
+  mesh.position.set(x, y, z);
+  scene.add(mesh);
+  const angle = Math.random() * Math.PI * 2;
+  droppedItems.push({
+    block,
+    mesh,
+    x,
+    y,
+    z,
+    vx: Math.cos(angle) * ITEM_POP_HORIZ,
+    vy: ITEM_POP_VY,
+    vz: Math.sin(angle) * ITEM_POP_HORIZ,
+    age: 0,
+  });
+}
+
+function disposeDroppedItem(item: DroppedItem) {
+  scene.remove(item.mesh);
+  item.mesh.geometry.dispose();
+}
+
+// 既存スタックに合流できれば true、新規スタックを作れれば true、満杯なら false
+function addItemToInventory(block: BlockId): boolean {
+  // 1) 同じブロックの既存スタックに追加
+  for (let i = 0; i < TOTAL_SLOTS; i++) {
+    const slot = inventory[i];
+    if (slot && slot.block === block && slot.count < MAX_STACK) {
+      slot.count += 1;
+      return true;
+    }
+  }
+  // 2) 空スロットに新規スタック
+  for (let i = 0; i < TOTAL_SLOTS; i++) {
+    if (inventory[i] === null) {
+      inventory[i] = { block, count: 1 };
+      return true;
+    }
+  }
+  return false;
+}
+
+function updateItems(dt: number) {
+  if (droppedItems.length === 0) return;
+  for (let i = droppedItems.length - 1; i >= 0; i--) {
+    const item = droppedItems[i];
+    item.age += dt;
+
+    // 寿命
+    if (item.age > ITEM_LIFETIME) {
+      disposeDroppedItem(item);
+      droppedItems.splice(i, 1);
+      continue;
+    }
+
+    // 重力 + 水平摩擦
+    item.vy += ITEM_GRAVITY * dt;
+    if (item.vy < ITEM_TERMINAL_VELOCITY) item.vy = ITEM_TERMINAL_VELOCITY;
+    // フレームレート非依存の減衰
+    const frictionFactor = Math.pow(ITEM_HORIZONTAL_FRICTION, dt * 60);
+    item.vx *= frictionFactor;
+    item.vz *= frictionFactor;
+
+    item.x += item.vx * dt;
+    item.y += item.vy * dt;
+    item.z += item.vz * dt;
+
+    // 簡易着地判定: ブロックの中心が opaque なら上面にスナップ
+    const cellY = Math.floor(item.y);
+    if (isSolid(Math.floor(item.x), cellY, Math.floor(item.z))) {
+      item.y = cellY + 1;
+      item.vy = 0;
+    }
+
+    // 拾得判定: プレイヤー中心 (足元+高さ/2) との距離
+    const dx = player.x - item.x;
+    const dy = player.y + PLAYER_HEIGHT * 0.5 - item.y;
+    const dz = player.z - item.z;
+    const distSq = dx * dx + dy * dy + dz * dz;
+    if (distSq < ITEM_PICKUP_RADIUS * ITEM_PICKUP_RADIUS) {
+      if (addItemToInventory(item.block)) {
+        disposeDroppedItem(item);
+        droppedItems.splice(i, 1);
+        renderSlots();
+        continue;
+      }
+    }
+
+    // 視覚アニメーション: バウンスと回転（描画用）
+    const bob = Math.sin(item.age * 2.5) * 0.06;
+    item.mesh.position.set(item.x, item.y + bob, item.z);
+    item.mesh.rotation.y = item.age * 1.8;
+  }
+}
+
 function modifyBlock(hit: THREE.Intersection, place: boolean) {
   if (!hit.face) return;
   const normal = hit.face.normal;
@@ -755,10 +892,20 @@ function modifyBlock(hit: THREE.Intersection, place: boolean) {
   const blocks = chunkBlocks.get(chunkKey(coords.cx, coords.cz));
   if (!blocks) return;
   const placement = inventory[selectedHotbarIndex];
-  if (place && placement === null) return; // 空スロット選択時は設置できない
-  blocks[idx(coords.lx, coords.y, coords.lz)] = place
-    ? placement!
-    : BLOCK.AIR;
+  if (place && (placement === null || placement.count === 0)) return; // 空スロット選択時は設置できない
+  const cellIdx = idx(coords.lx, coords.y, coords.lz);
+  const previousBlock = blocks[cellIdx] as BlockId;
+  blocks[cellIdx] = place ? placement!.block : BLOCK.AIR;
+
+  if (place) {
+    // 設置時はホットバーのスタックを 1 消費
+    placement!.count -= 1;
+    if (placement!.count === 0) inventory[selectedHotbarIndex] = null;
+    renderSlots();
+  } else if (previousBlock !== BLOCK.AIR && !isWaterBlock(previousBlock)) {
+    // 破壊時はそのブロックに対応するアイテムをドロップ（水は除外）
+    spawnDroppedItem(previousBlock, wx + 0.5, wy + 0.5, wz + 0.5);
+  }
 
   // 水流の再評価候補に追加
   markPendingWithNeighbors(wx, wy, wz);
@@ -876,14 +1023,25 @@ for (let i = 0; i < TOTAL_SLOTS; i++) {
 function renderSlots() {
   for (let i = 0; i < TOTAL_SLOTS; i++) {
     const el = slotEls[i];
-    const item = inventory[i];
-    if (item !== null) {
-      const [r, g, b] = blockColor(item);
+    const stack = inventory[i];
+    const slotLabel = i < HOTBAR_SLOTS ? i + 1 : "";
+    if (stack !== null) {
+      const [r, g, b] = blockColor(stack.block);
       el.style.background = `rgb(${r},${g},${b})`;
-      el.innerHTML = `<div style="font-weight:bold;">${i < HOTBAR_SLOTS ? i + 1 : ""}</div><div style="text-align:center;font-size:10px;">${BLOCK_NAMES[item]}</div>`;
+      const countText =
+        stack.count > 1
+          ? `<div style="text-align:right;font-weight:bold;font-size:13px;">${stack.count}</div>`
+          : `<div></div>`;
+      el.innerHTML = `
+        <div style="display:flex;justify-content:space-between;align-items:flex-start;font-weight:bold;font-size:11px;">
+          <span>${slotLabel}</span>
+        </div>
+        <div style="text-align:center;font-size:9px;line-height:1.1;">${BLOCK_NAMES[stack.block]}</div>
+        ${countText}
+      `;
     } else {
       el.style.background = "rgba(0,0,0,0.3)";
-      el.innerHTML = `<div style="font-weight:bold;color:rgba(255,255,255,0.35);">${i < HOTBAR_SLOTS ? i + 1 : ""}</div>`;
+      el.innerHTML = `<div style="font-weight:bold;color:rgba(255,255,255,0.35);">${slotLabel}</div>`;
     }
     if (i < HOTBAR_SLOTS) {
       const sel = i === selectedHotbarIndex;
@@ -900,8 +1058,12 @@ function renderSlots() {
 
 function renderHeldItem() {
   if (heldItem !== null) {
-    const [r, g, b] = blockColor(heldItem);
+    const [r, g, b] = blockColor(heldItem.block);
     heldItemEl.style.background = `rgb(${r},${g},${b})`;
+    heldItemEl.innerHTML =
+      heldItem.count > 1
+        ? `<div style="position:absolute;bottom:2px;right:4px;color:white;text-shadow:1px 1px 0 black;font-weight:bold;font-family:sans-serif;font-size:13px;">${heldItem.count}</div>`
+        : "";
     heldItemEl.style.display = "block";
   } else {
     heldItemEl.style.display = "none";
@@ -910,15 +1072,25 @@ function renderHeldItem() {
 
 function handleSlotClick(index: number) {
   if (!inventoryOpen) return;
-  const item = inventory[index];
+  const slot = inventory[index];
   if (heldItem === null) {
-    if (item !== null) {
-      heldItem = item;
+    if (slot !== null) {
+      heldItem = slot;
       inventory[index] = null;
     }
   } else {
-    inventory[index] = heldItem;
-    heldItem = item;
+    // 同じ種類なら合流（MAX_STACK まで）
+    if (slot !== null && slot.block === heldItem.block) {
+      const room = MAX_STACK - slot.count;
+      const move = Math.min(room, heldItem.count);
+      slot.count += move;
+      heldItem.count -= move;
+      if (heldItem.count === 0) heldItem = null;
+    } else {
+      // スワップ
+      inventory[index] = heldItem;
+      heldItem = slot;
+    }
   }
   renderSlots();
   renderHeldItem();
@@ -1044,6 +1216,7 @@ function update(dt: number) {
     if (player.vy < TERMINAL_VELOCITY) player.vy = TERMINAL_VELOCITY;
     moveAndCollide(player, isSolid, dt);
     updatePlayerAnimation(dt);
+    updateItems(dt);
     waterTickAcc += dt;
     while (waterTickAcc >= WATER_TICK_INTERVAL) {
       waterTick();
@@ -1100,6 +1273,9 @@ function update(dt: number) {
 
   // プレイヤーアニメ
   updatePlayerAnimation(dt);
+
+  // ドロップアイテム（物理 + 拾得判定）
+  updateItems(dt);
 
   // 水流ティック（5Hz）
   waterTickAcc += dt;
