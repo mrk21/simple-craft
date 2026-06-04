@@ -5,13 +5,23 @@
 export interface InputState {
   // 現在押されているキー (e.code、layout 非依存)
   keys: Set<string>;
-  // 直近 consume 以降のマウス移動量の累積
+  // 直近 consume 以降のマウス / look-drag 移動量の累積
   mouseDX: number;
   mouseDY: number;
+  // バーチャルジョイスティック (-1..1)。タッチ時のみセットされ、未使用時は 0
+  // 画面の X+ が右、Y+ が下（DOM 標準）
+  joystickX: number;
+  joystickY: number;
 }
 
 export function createInputState(): InputState {
-  return { keys: new Set(), mouseDX: 0, mouseDY: 0 };
+  return {
+    keys: new Set(),
+    mouseDX: 0,
+    mouseDY: 0,
+    joystickX: 0,
+    joystickY: 0,
+  };
 }
 
 export interface InstallInputHandlersOptions {

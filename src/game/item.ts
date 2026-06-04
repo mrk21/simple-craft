@@ -1,5 +1,5 @@
 import * as THREE from 'three';
-import { BLOCK, type BlockId, blockColor } from '../world/block';
+import { BLOCK, type BlockId } from '../world/block';
 
 // ============================================================
 // インベントリ（ホットバー + 倉庫グリッド）
@@ -141,18 +141,16 @@ export const ITEM_HORIZONTAL_FRICTION = 0.85;
 export const ITEM_PICKUP_RADIUS = 1.5;
 export const ITEM_LIFETIME = 300; // 5 分で自動消滅
 
+// mesh は呼び出し側で構築（テクスチャ付きジオメトリ＋共有マテリアル）
+// dropped item は state + 物理のみ担当し、グラフィクスの組み立ては main.ts 側
 export function spawnDroppedItem(
   block: BlockId,
+  mesh: THREE.Mesh,
   x: number,
   y: number,
   z: number,
   scene: THREE.Scene,
 ): DroppedItem {
-  const [r, g, b] = blockColor(block);
-  const color = (r << 16) | (g << 8) | b;
-  const geo = new THREE.BoxGeometry(ITEM_SIZE, ITEM_SIZE, ITEM_SIZE);
-  const mat = new THREE.MeshLambertMaterial({ color });
-  const mesh = new THREE.Mesh(geo, mat);
   mesh.position.set(x, y, z);
   scene.add(mesh);
   const angle = Math.random() * Math.PI * 2;
@@ -174,7 +172,7 @@ export function disposeDroppedItem(
   scene: THREE.Scene,
 ): void {
   scene.remove(item.mesh);
-  item.mesh.geometry.dispose();
+  // ジオメトリは block ごとに共有されているので dispose しない
 }
 
 // 物理: 重力 + 水平摩擦 + 着地判定（純粋関数、テスト容易）

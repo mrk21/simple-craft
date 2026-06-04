@@ -10,6 +10,8 @@ test('createInputState: 初期状態は空', () => {
   expect(s.keys.size).toBe(0);
   expect(s.mouseDX).toBe(0);
   expect(s.mouseDY).toBe(0);
+  expect(s.joystickX).toBe(0);
+  expect(s.joystickY).toBe(0);
 });
 
 test('consumeMouseDelta: 累積値を返し、状態をリセット', () => {

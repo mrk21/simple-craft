@@ -43,6 +43,7 @@ import {
 } from "./game/physics";
 import {
   HOTBAR_SLOTS,
+  ITEM_SIZE,
   addItemToInventory,
   applyDroppedItemPhysics,
   consumeSelected,
@@ -56,6 +57,7 @@ import {
   syncDroppedItemMesh,
   type DroppedItem,
 } from "./game/item";
+import { buildBlockGeometry } from "./render/block-mesh";
 import {
   createPlayerEntity,
   setPlayerEntityTransform,
@@ -86,6 +88,7 @@ import {
   nextViewMode,
   type ViewMode,
 } from "./core/camera";
+import { createTouchControls, isTouchDevice } from "./core/touch-controls";
 import {
   createCrosshair,
   createHudTextOverlay,
@@ -129,6 +132,7 @@ renderer.setSize(window.innerWidth, window.innerHeight);
 document.body.appendChild(renderer.domElement);
 
 const atlasTexture = buildAtlasTexture();
+const atlasCanvas = atlasTexture.image as HTMLCanvasElement;
 const opaqueMaterial = new THREE.MeshLambertMaterial({
   vertexColors: true,
   map: atlasTexture,
@@ -140,6 +144,17 @@ const waterMaterial = new THREE.MeshLambertMaterial({
   opacity: 0.6,
   depthWrite: false,
 });
+// ドロップアイテム用: 頂点カラーなし（AO 不要）、テクスチャをそのまま見せる
+const itemMaterial = new THREE.MeshLambertMaterial({ map: atlasTexture });
+const itemGeometryCache = new Map<BlockId, THREE.BufferGeometry>();
+function createItemMesh(block: BlockId): THREE.Mesh {
+  let geo = itemGeometryCache.get(block);
+  if (!geo) {
+    geo = buildBlockGeometry(block, ITEM_SIZE);
+    itemGeometryCache.set(block, geo);
+  }
+  return new THREE.Mesh(geo, itemMaterial);
+}
 
 const sun = new THREE.DirectionalLight(0xffffff, 1.0);
 sun.position.set(20, 50, 30);
@@ -587,12 +602,16 @@ let yaw = 0;
 let pitch = 0;
 const MOUSE_SENSITIVITY = 0.002;
 
-// クリックで pointer lock 取得
-renderer.domElement.addEventListener("click", () => {
-  if (document.pointerLockElement !== renderer.domElement) {
-    renderer.domElement.requestPointerLock();
-  }
-});
+const touchEnabled = isTouchDevice();
+
+// クリックで pointer lock 取得（タッチデバイスではスキップ）
+if (!touchEnabled) {
+  renderer.domElement.addEventListener("click", () => {
+    if (document.pointerLockElement !== renderer.domElement) {
+      renderer.domElement.requestPointerLock();
+    }
+  });
+}
 
 // ============================================================
 // ブロック設置/破壊（中央レイキャスト）
@@ -674,7 +693,14 @@ function modifyBlock(hit: THREE.Intersection, place: boolean) {
     if (previousBlock !== BLOCK.AIR && !isWaterBlock(previousBlock)) {
       // 破壊時はそのブロックに対応するアイテムをドロップ（水は除外）
       droppedItems.push(
-        spawnDroppedItem(previousBlock, wx + 0.5, wy + 0.5, wz + 0.5, scene),
+        spawnDroppedItem(
+          previousBlock,
+          createItemMesh(previousBlock),
+          wx + 0.5,
+          wy + 0.5,
+          wz + 0.5,
+          scene,
+        ),
       );
     }
   }
@@ -748,11 +774,16 @@ createCrosshair();
 
 const inventoryUi = createInventoryUi({
   blockNames: BLOCK_NAMES,
+  atlasCanvas,
   onSlotClick: (index) => {
     if (!inventoryOpen) return;
     swapOrMergeSlot(inv, index);
     inventoryUi.renderSlots(inv);
     inventoryUi.renderHeld(inv.heldItem);
+  },
+  onHotbarSelect: (index) => {
+    inv.selectedHotbarIndex = index;
+    renderSlots();
   },
 });
 
@@ -764,11 +795,46 @@ function renderHeldItem() {
 }
 
 function updateLockOverlay() {
+  if (touchEnabled) {
+    lockOverlay.setVisible(false);
+    return;
+  }
   const locked = document.pointerLockElement === renderer.domElement;
   lockOverlay.setVisible(!locked && !inventoryOpen);
 }
 
 document.addEventListener("pointerlockchange", updateLockOverlay);
+// 起動直後に一度だけ反映（タッチデバイスは pointerlockchange が発火しないため）
+updateLockOverlay();
+
+// ============================================================
+// タッチ操作（スマホ・タブレット）
+// ============================================================
+
+if (touchEnabled) {
+  createTouchControls(renderer.domElement, input, {
+    onTapPlace: () => {
+      if (inventoryOpen) return;
+      const hit = pickHit();
+      if (!hit) return;
+      triggerArmSwing(playerEntity);
+      modifyBlock(hit, true);
+    },
+    onLongPressBreak: () => {
+      if (inventoryOpen) return;
+      const hit = pickHit();
+      if (!hit) return;
+      triggerArmSwing(playerEntity);
+      modifyBlock(hit, false);
+    },
+    onInventoryToggle: () => setInventoryOpen(!inventoryOpen),
+    onViewToggle: () => {
+      viewMode = nextViewMode(viewMode);
+      setPlayerEntityVisible(playerEntity, viewMode !== "first");
+      updateHud();
+    },
+  });
+}
 
 function setInventoryOpen(open: boolean) {
   if (inventoryOpen === open) return;
@@ -788,8 +854,10 @@ function setInventoryOpen(open: boolean) {
       renderSlots();
     }
     discardMouseDelta(input);
-    // E キー（user gesture）で閉じている前提で pointer lock を再取得
-    renderer.domElement.requestPointerLock();
+    if (!touchEnabled) {
+      // E キー（user gesture）で閉じている前提で pointer lock を再取得
+      renderer.domElement.requestPointerLock();
+    }
   }
   updateLockOverlay();
 }
@@ -810,13 +878,22 @@ function updateHud() {
       : viewMode === "third-back"
         ? "third-person (back)"
         : "third-person (front)";
-  hudOverlay.setHTML(`
-    View: <b>${viewLabel}</b> (F5)<br>
-    WASD = move, Space = jump<br>
-    Left click = break / Right click = place<br>
-    1-9 = select slot, wheel = cycle<br>
-    E = open inventory / ESC = release cursor
-  `.trim());
+  if (touchEnabled) {
+    hudOverlay.setHTML(`
+      View: <b>${viewLabel}</b><br>
+      Left joystick = move / Jump button = jump<br>
+      Tap = place / Long-press = break<br>
+      Tap hotbar = select / ≡ = inventory / ◐ = view
+    `.trim());
+  } else {
+    hudOverlay.setHTML(`
+      View: <b>${viewLabel}</b> (F5)<br>
+      WASD = move, Space = jump<br>
+      Left click = break / Right click = place<br>
+      1-9 = select slot, wheel = cycle<br>
+      E = open inventory / ESC = release cursor
+    `.trim());
+  }
 }
 updateHud();
 
@@ -888,17 +965,25 @@ function update(dt: number) {
   pitch -= dy * MOUSE_SENSITIVITY;
   pitch = Math.max(-Math.PI / 2 + 0.01, Math.min(Math.PI / 2 - 0.01, pitch));
 
-  // WASD → 移動方向（ヨー基準）
+  // WASD → 移動方向（ヨー基準）。タッチ時はジョイスティックも合算
   let forward = 0;
   let strafe = 0;
   if (input.keys.has("KeyW")) forward += 1;
   if (input.keys.has("KeyS")) forward -= 1;
   if (input.keys.has("KeyA")) strafe -= 1;
   if (input.keys.has("KeyD")) strafe += 1;
-  const len = Math.hypot(forward, strafe);
-  if (len > 0) {
-    forward /= len;
-    strafe /= len;
+  const wasdLen = Math.hypot(forward, strafe);
+  if (wasdLen > 0) {
+    forward /= wasdLen;
+    strafe /= wasdLen;
+  }
+  // ジョイスティック: 画面上方向（Y-）が前進、X+ が右
+  forward += -input.joystickY;
+  strafe += input.joystickX;
+  const totalLen = Math.hypot(forward, strafe);
+  if (totalLen > 1) {
+    forward /= totalLen;
+    strafe /= totalLen;
   }
   const fx = -Math.sin(yaw);
   const fz = -Math.cos(yaw);
