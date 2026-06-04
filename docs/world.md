@@ -19,7 +19,7 @@
 ```
 シード+座標
    ↓
-heightmap (Float32Array, 16×16)
+heightmap (Uint8Array, 16×16) ※各セルは「表面ブロックの Y」
    ↓
 ブロック配置 (Uint8Array, 16×16×128)
    ├ y < height-3: 石

@@ -30,7 +30,7 @@ worker.postMessage({ blocks: buffer }, [buffer]);
 ```
 入力: { chunkX, chunkZ, seed }
   ↓
-① noise → heightmap (Float32Array)
+① noise → heightmap (Uint8Array)
 ② heightmap → blocks (Uint8Array)
 ③ blocks → mesh data
    - positions (Float32Array)
