@@ -2,9 +2,11 @@ import { test, expect } from 'vitest';
 import { BLOCK } from '../world/block';
 import {
   HOTBAR_SLOTS,
+  ITEM_SIZE,
   MAX_STACK,
   TOTAL_SLOTS,
   addItemToInventory,
+  applyDroppedItemPhysics,
   consumeSelected,
   createInventoryState,
   isExpired,
@@ -152,6 +154,33 @@ test('isExpired: 寿命未満は false、超えたら true', () => {
   expect(isExpired(item)).toBe(false);
   item.age = 999;
   expect(isExpired(item)).toBe(true);
+});
+
+test('applyDroppedItemPhysics: 中心が固体に埋まっていたら上に押し出される', () => {
+  // y=64 のセルが固体。アイテムが y=64.5 で中心ごと埋まった状態（ブロック設置を模す）
+  const item = makeItem({ x: 0.5, y: 64.5, z: 0.5, vy: 0 });
+  const isSolid = (_x: number, y: number, _z: number) => y === 64;
+  applyDroppedItemPhysics(item, 1 / 60, isSolid);
+  // 固体の上に飛び出して、下面が固体上端（y=65）に乗る
+  expect(item.y).toBeCloseTo(65 + ITEM_SIZE / 2);
+});
+
+test('applyDroppedItemPhysics: 固体が縦に複数積まれていても一番上に押し出される', () => {
+  // y=64, 65 が固体。アイテムは y=64.5 で 1 段目に埋まる
+  const item = makeItem({ x: 0.5, y: 64.5, z: 0.5, vy: 0 });
+  const isSolid = (_x: number, y: number, _z: number) => y === 64 || y === 65;
+  applyDroppedItemPhysics(item, 1 / 60, isSolid);
+  expect(item.y).toBeCloseTo(66 + ITEM_SIZE / 2);
+});
+
+test('applyDroppedItemPhysics: 地面にぶつかると下面がブロック上面に乗る（めり込まない）', () => {
+  // y=64 が固体、y>=65 が空気。中心が固体セル内 (64.5) からスタートして1フレーム進める
+  const item = makeItem({ x: 0.5, y: 64.5, z: 0.5, vy: 0 });
+  const isSolid = (_x: number, y: number, _z: number) => y === 64;
+  applyDroppedItemPhysics(item, 1 / 60, isSolid);
+  // 固体ブロックの上面は y=65。アイテム中心は 65 + ITEM_SIZE/2 で下面が 65 にちょうど乗る
+  expect(item.y).toBeCloseTo(65 + ITEM_SIZE / 2);
+  expect(item.vy).toBe(0);
 });
 
 // テストヘルパー: mesh は使わないので any でモック

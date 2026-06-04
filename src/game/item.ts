@@ -190,16 +190,30 @@ export function applyDroppedItemPhysics(
   item.x += item.vx * dt;
   item.y += item.vy * dt;
   item.z += item.vz * dt;
-  const cellY = Math.floor(item.y);
-  if (isSolid(Math.floor(item.x), cellY, Math.floor(item.z))) {
-    item.y = cellY + 1;
+  // 中心が固体に埋まっていたら上に押し出す（プレイヤーが落下中のアイテム上にブロック設置した場合等）
+  // 縦に複数固体が積まれていても抜けるまで繰り返す
+  const ix = Math.floor(item.x);
+  const iz = Math.floor(item.z);
+  let safety = 256;
+  while (safety-- > 0) {
+    const cy = Math.floor(item.y);
+    if (!isSolid(ix, cy, iz)) break;
+    item.y = cy + 1 + ITEM_SIZE / 2;
+    item.vy = 0;
+  }
+  // 下面で衝突判定し、下面を固体ブロックの上面にスナップする（中心基準だと半分めり込む）
+  const bottomY = item.y - ITEM_SIZE / 2;
+  const cellY = Math.floor(bottomY);
+  if (isSolid(ix, cellY, iz)) {
+    item.y = cellY + 1 + ITEM_SIZE / 2;
     item.vy = 0;
   }
 }
 
 // 視覚演出（バウンス + Y軸回転）をメッシュに反映
+// bob は [0, 0.12] のみ。負方向には行かないので地面にめり込まない
 export function syncDroppedItemMesh(item: DroppedItem): void {
-  const bob = Math.sin(item.age * 2.5) * 0.06;
+  const bob = (Math.sin(item.age * 2.5) + 1) * 0.06;
   item.mesh.position.set(item.x, item.y + bob, item.z);
   item.mesh.rotation.y = item.age * 1.8;
 }
