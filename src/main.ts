@@ -53,10 +53,19 @@ const INITIAL_RADIUS = 1; // 起動時に同期ロードする範囲
 // シーン
 // ============================================================
 
+const SKY_COLOR = 0x87ceeb;
+const UNDERWATER_COLOR = 0x0a3a5c; // 濃い藍色
+const SKY_FOG_NEAR = 30;
+const SKY_FOG_FAR = 70;
+const UNDERWATER_FOG_NEAR = 0.5;
+const UNDERWATER_FOG_FAR = 18;
+
 const scene = new THREE.Scene();
-scene.background = new THREE.Color(0x87ceeb);
+const skyBackground = new THREE.Color(SKY_COLOR);
+scene.background = skyBackground;
 // VIEW_RADIUS=3, CHUNK_SIZE=16 → 視野端まで ~50 ブロック。フォグを合わせて pop-in を隠す
-scene.fog = new THREE.Fog(0x87ceeb, 30, 70);
+const sceneFog = new THREE.Fog(SKY_COLOR, SKY_FOG_NEAR, SKY_FOG_FAR);
+scene.fog = sceneFog;
 
 const camera = new THREE.PerspectiveCamera(
   70,
@@ -799,6 +808,25 @@ function render() {
   camera.rotation.y = yaw;
   camera.rotation.x = pitch;
   camera.position.set(player.x, player.y + PLAYER_EYE_OFFSET, player.z);
+
+  // 視点（目の位置）が水中なら濃い藍色のフォグ + 背景に切替
+  const eyeInWater = isWater(
+    Math.floor(player.x),
+    Math.floor(player.y + PLAYER_EYE_OFFSET),
+    Math.floor(player.z),
+  );
+  if (eyeInWater) {
+    sceneFog.color.setHex(UNDERWATER_COLOR);
+    sceneFog.near = UNDERWATER_FOG_NEAR;
+    sceneFog.far = UNDERWATER_FOG_FAR;
+    skyBackground.setHex(UNDERWATER_COLOR);
+  } else {
+    sceneFog.color.setHex(SKY_COLOR);
+    sceneFog.near = SKY_FOG_NEAR;
+    sceneFog.far = SKY_FOG_FAR;
+    skyBackground.setHex(SKY_COLOR);
+  }
+
   renderer.render(scene, camera);
 }
 
