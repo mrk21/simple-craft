@@ -8,6 +8,7 @@
 | 領域         | ファイル                         | 内容                                       |
 | ------------ | -------------------------------- | ------------------------------------------ |
 | ワールド構造 | [world.md](world.md)             | チャンク分割、生成パイプライン、境界処理   |
+| 地形生成     | [terrain.md](terrain.md)         | ノイズチャネル合成、決定論、パラメータ調整 |
 | レンダリング | [rendering.md](rendering.md)     | マテリアル、Greedy Meshing、AO、水・透明度 |
 | ゲームループ | [game-loop.md](game-loop.md)     | 固定タイムステップ、入力、Visibility API   |
 | 並列化       | [concurrency.md](concurrency.md) | Worker プール、Transferable、wasm 移行パス |

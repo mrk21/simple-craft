@@ -95,5 +95,6 @@ src/
   - [docs/concurrency.md](docs/concurrency.md) — Web Worker
   - [docs/storage.md](docs/storage.md) — IndexedDB
   - [docs/textures.md](docs/textures.md) — テクスチャ仕様
+  - [docs/terrain.md](docs/terrain.md) — 地形生成アルゴリズム
 - [.claude/skills/add-block/](.claude/skills/add-block/SKILL.md) — ブロック追加手順
 - [.claude/skills/tdd/](.claude/skills/tdd/SKILL.md) — TDD サイクル

@@ -30,7 +30,9 @@ heightmap (Uint8Array, 16×16) ※各セルは「表面ブロックの Y」
 メッシュ生成 (positions/normals/uvs/indices/colors)
 ```
 
-heightmap 生成、ブロック配置、メッシュ生成は全部 Worker 側に閉じる。Worker 設計は [concurrency.md](concurrency.md)、メッシュ生成アルゴリズムは [rendering.md](rendering.md) を参照。
+heightmap 生成、ブロック配置、メッシュ生成は全部 Worker 側に閉じる。
+Worker 設計は [concurrency.md](concurrency.md)、メッシュ生成アルゴリズムは [rendering.md](rendering.md)、
+heightmap を作るノイズアルゴリズム（大陸度 + FBM 等）は [terrain.md](terrain.md) を参照。
 
 ## 隣接チャンクの境界処理
 
