@@ -100,7 +100,7 @@ import { createInventoryUi } from "./ui/inventory-ui";
 // シードはタイトル画面 or URL ?seed=N で決まる（bootstrap() 内で代入）
 let SEED = 0;
 let WORLD_NAME = "";
-const VIEW_RADIUS = 3; // プレイヤーから ±VIEW_RADIUS チャンク = (2R+1)^2 がロード対象
+const VIEW_RADIUS = 6; // プレイヤーから ±VIEW_RADIUS チャンク = (2R+1)^2 がロード対象
 const INITIAL_RADIUS = 1; // 起動時に同期ロードする範囲
 
 // ============================================================
@@ -109,15 +109,15 @@ const INITIAL_RADIUS = 1; // 起動時に同期ロードする範囲
 
 const SKY_COLOR = 0x87ceeb;
 const UNDERWATER_COLOR = 0x0a3a5c; // 濃い藍色
-const SKY_FOG_NEAR = 30;
-const SKY_FOG_FAR = 70;
+const SKY_FOG_NEAR = 60;
+const SKY_FOG_FAR = 130;
 const UNDERWATER_FOG_NEAR = 0.5;
 const UNDERWATER_FOG_FAR = 18;
 
 const scene = new THREE.Scene();
 const skyBackground = new THREE.Color(SKY_COLOR);
 scene.background = skyBackground;
-// VIEW_RADIUS=3, CHUNK_SIZE=16 → 視野端まで ~50 ブロック。フォグを合わせて pop-in を隠す
+// VIEW_RADIUS=6, CHUNK_SIZE=16 → 視野端まで ~100 ブロック。フォグを合わせて pop-in を隠す
 const sceneFog = new THREE.Fog(SKY_COLOR, SKY_FOG_NEAR, SKY_FOG_FAR);
 scene.fog = sceneFog;
 

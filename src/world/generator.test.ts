@@ -45,24 +45,44 @@ test('全ての高さが [0, CHUNK_SIZE_Y) に収まる', () => {
   }
 });
 
-test('チャンク境界で高さが連続している（X方向）', () => {
+test('チャンク境界で高さが連続している（X方向、隣接セル差≤4）', () => {
+  // 多オクターブ + 山岳ノイズで斜面は急になるが、ノイズ自体は連続なので
+  // 境界での隣接セル差は数ブロックに収まる
   const left = generateHeightmap(0, 0, 12345);
   const right = generateHeightmap(1, 0, 12345);
   for (let z = 0; z < CHUNK_SIZE_Z; z++) {
     const leftEdge = left[CHUNK_SIZE_X - 1 + z * CHUNK_SIZE_X];
     const rightEdge = right[0 + z * CHUNK_SIZE_X];
-    expect(Math.abs(leftEdge - rightEdge)).toBeLessThanOrEqual(2);
+    expect(Math.abs(leftEdge - rightEdge)).toBeLessThanOrEqual(4);
   }
 });
 
-test('チャンク境界で高さが連続している（Z方向）', () => {
+test('チャンク境界で高さが連続している（Z方向、隣接セル差≤4）', () => {
   const near = generateHeightmap(0, 0, 12345);
   const far = generateHeightmap(0, 1, 12345);
   for (let x = 0; x < CHUNK_SIZE_X; x++) {
     const nearEdge = near[x + (CHUNK_SIZE_Z - 1) * CHUNK_SIZE_X];
     const farEdge = far[x + 0 * CHUNK_SIZE_X];
-    expect(Math.abs(nearEdge - farEdge)).toBeLessThanOrEqual(2);
+    expect(Math.abs(nearEdge - farEdge)).toBeLessThanOrEqual(4);
   }
+});
+
+test('複数チャンク全体で見て陸地（>SEA_LEVEL+8）と海底（<SEA_LEVEL-5）の両方が現れる', () => {
+  // 大陸度ノイズで「内陸（丘）」と「深い海」が混在することの確認
+  let maxH = 0;
+  let minH = 255;
+  const seed = 12345;
+  for (let cz = -4; cz <= 4; cz++) {
+    for (let cx = -4; cx <= 4; cx++) {
+      const h = generateHeightmap(cx, cz, seed);
+      for (let i = 0; i < h.length; i++) {
+        if (h[i] > maxH) maxH = h[i];
+        if (h[i] < minH) minH = h[i];
+      }
+    }
+  }
+  expect(maxH).toBeGreaterThan(SEA_LEVEL + 8);
+  expect(minH).toBeLessThan(SEA_LEVEL - 5);
 });
 
 test('blocks は Uint8Array で長さは CHUNK_VOLUME', () => {
