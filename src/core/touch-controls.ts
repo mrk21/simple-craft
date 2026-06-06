@@ -175,11 +175,11 @@ export function createTouchControls(
 
   function updateJoyVisual(centerX: number, centerY: number, nx: number, ny: number): void {
     joyBase.style.display = "block";
-    joyBase.style.left = centerX + "px";
-    joyBase.style.top = centerY + "px";
+    joyBase.style.left = `${centerX}px`;
+    joyBase.style.top = `${centerY}px`;
     joyKnob.style.display = "block";
-    joyKnob.style.left = centerX + nx * JOY_RADIUS + "px";
-    joyKnob.style.top = centerY + ny * JOY_RADIUS + "px";
+    joyKnob.style.left = `${centerX + nx * JOY_RADIUS}px`;
+    joyKnob.style.top = `${centerY + ny * JOY_RADIUS}px`;
   }
 
   function hideJoyVisual(): void {

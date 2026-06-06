@@ -1,4 +1,4 @@
-import * as THREE from 'three';
+import type * as THREE from 'three';
 import { BLOCK, type BlockId } from '../world/block';
 
 // ============================================================
@@ -184,7 +184,7 @@ export function applyDroppedItemPhysics(
   item.age += dt;
   item.vy += ITEM_GRAVITY * dt;
   if (item.vy < ITEM_TERMINAL_VELOCITY) item.vy = ITEM_TERMINAL_VELOCITY;
-  const frictionFactor = Math.pow(ITEM_HORIZONTAL_FRICTION, dt * 60);
+  const frictionFactor = ITEM_HORIZONTAL_FRICTION ** (dt * 60);
   item.vx *= frictionFactor;
   item.vz *= frictionFactor;
   item.x += item.vx * dt;

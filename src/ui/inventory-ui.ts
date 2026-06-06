@@ -8,7 +8,7 @@ import {
   type InventoryState,
   type ItemStack,
 } from "../game/item";
-import { type BlockId } from "../world/block";
+import type { BlockId } from "../world/block";
 import { getBlockIconUrl } from "./block-icon";
 
 // 狭い画面（スマホ）でも 9 スロット並ぶようにレスポンシブ。
@@ -154,8 +154,8 @@ export function createInventoryUi(opts: CreateInventoryUiOptions): InventoryUi {
   }
 
   function setHeldPosition(x: number, y: number) {
-    heldItemEl.style.left = x + "px";
-    heldItemEl.style.top = y + "px";
+    heldItemEl.style.left = `${x}px`;
+    heldItemEl.style.top = `${y}px`;
   }
 
   return {

@@ -45,7 +45,7 @@ export function createPauseOverlay(opts: PauseOverlayOptions): PauseOverlay {
     "min-width:240px;padding:14px 24px;font-size:16px;font-weight:bold;color:white;border:none;border-radius:6px;cursor:pointer;font-family:inherit;";
   const resumeBtn = document.createElement("button");
   resumeBtn.textContent = opts.resumeLabel ?? "ゲームに戻る";
-  resumeBtn.style.cssText = btnCss + "background:#4a7a55;";
+  resumeBtn.style.cssText = `${btnCss}background:#4a7a55;`;
   resumeBtn.addEventListener("click", (e) => {
     e.stopPropagation();
     opts.onResume();
@@ -64,7 +64,7 @@ export function createPauseOverlay(opts: PauseOverlayOptions): PauseOverlay {
 
   const titleBtn = document.createElement("button");
   titleBtn.textContent = "タイトルへ戻る";
-  titleBtn.style.cssText = btnCss + "background:#555;";
+  titleBtn.style.cssText = `${btnCss}background:#555;`;
   titleBtn.addEventListener("click", (e) => {
     e.stopPropagation();
     opts.onReturnToTitle();

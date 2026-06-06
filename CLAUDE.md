@@ -5,6 +5,14 @@ Minecraftライクなボクセルゲーム。ブラウザ上でWebGLで動作。
 詳細な設計判断は [docs/design.md](docs/design.md)（トピック別に [docs/](docs/) 内に分割）を参照。
 実装手順系は [.claude/skills/](.claude/skills/) の skill（`add-block`、`tdd`）が用意されているので、該当タスクの時はそちらを使う。
 
+## ワークフロー
+
+- ターン終了時に `npm run check`（typecheck + lint + test）が Stop hook で自動実行される。失敗したらコンテキストとして返ってくるので、緑になるまで直す
+- 純粋ロジックを書き換えた時の単発確認は `npx vitest run path/to/file.test.ts` で個別実行が速い
+- 自動修正可能な lint 違反は `npm run lint:fix` で潰す
+- 複数ファイルにまたがる調査や、`docs/` を横断する読み込みは `Explore` / `general-purpose` subagent に投げてメインコンテキストを節約する
+- 不慣れな領域での複数ファイル変更は Plan Mode で開始する
+
 ## スタック
 
 - Vite + TypeScript
